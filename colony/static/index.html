@@ -55,13 +55,20 @@
           <button type="button" id="btn-warp-transit" class="primary">Warp to arrival</button>
         </div>
         <div id="panel-system" hidden>
-          <h2>Authorize builds</h2>
-          <p class="muted">Ark arrived with materials. Build gear before ordering it.</p>
-          <div id="build-units"></div>
-          <div id="build-queue"></div>
           <h2>Fleet</h2>
+          <p class="muted">Select a unit. Select the <strong>Colony Ark</strong> to manage fabrication.</p>
           <div id="fleet-list"></div>
-          <h2>Selected unit</h2>
+
+          <!-- Only when ark is selected: fabrication bay + authorize builds -->
+          <div id="ark-bay" hidden>
+            <h2>Ark fabrication bay</h2>
+            <div id="build-queue" class="queue-list"></div>
+            <h2>Authorize construction</h2>
+            <p class="muted">Spend seed materials. Jobs appear in the bay queue above.</p>
+            <div id="build-units"></div>
+          </div>
+
+          <!-- Other units: status only (orders stay with map selection on the right) -->
           <div id="unit-panel" class="empty">Select a unit</div>
         </div>
       </div>

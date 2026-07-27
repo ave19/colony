@@ -135,8 +135,8 @@ function render() {
   }
 
   renderCatalog();
-  renderBuildUnits();
   renderFleet();
+  renderArkBay();
   renderUnitPanel();
   renderBodyPanel();
   renderOrders();
@@ -147,48 +147,74 @@ function render() {
   renderEvents();
 }
 
-function renderBuildUnits() {
+function isArkSelected() {
+  const u = unitById(selectedUnitId);
+  return u && u.kind === "ark";
+}
+
+/** Ark fabrication bay: queue + authorize — only when Colony Ark is selected. */
+function renderArkBay() {
+  const bay = $("ark-bay");
   const el = $("build-units");
   const qel = $("build-queue");
-  if (!el || state.phase !== "system") return;
+  if (!bay || !el || !qel || state.phase !== "system") return;
+
+  if (!isArkSelected()) {
+    bay.hidden = true;
+    return;
+  }
+  bay.hidden = false;
+
+  // Queue first — this is the "it's happening" surface
+  const builds = state.builds || [];
+  if (!builds.length) {
+    qel.innerHTML =
+      '<div class="queue-empty">Fabrication bay idle. Authorize a construction job below.</div>';
+  } else {
+    qel.innerHTML = builds
+      .map((j) => {
+        const total = j.months_total || 1;
+        const left = Math.max(0, j.months_left || 0);
+        const done = Math.min(100, ((total - left) / total) * 100);
+        return `<div class="queue-job">
+          <div class="title">${j.name}</div>
+          <div class="meta">In bay · ${left.toFixed(1)} mo remaining of ${total.toFixed(1)} mo · warp to advance</div>
+          <div class="queue-bar"><i style="width:${done.toFixed(1)}%"></i></div>
+        </div>`;
+      })
+      .join("");
+  }
+
   const specs = state.unit_builds || {};
   el.innerHTML = Object.values(specs)
     .map((s) => {
       const cost = Object.entries(s.cost || {})
-        .map(([k, v]) => `${v}t ${k}`)
+        .map(([k, v]) => `${v} t ${k}`)
         .join(", ");
       return `<div class="card">
         <h3>${s.name}</h3>
         <p>${s.description || ""}</p>
-        <p class="muted">${cost} · ${s.months} mo</p>
-        <button type="button" class="primary" data-build="${s.id}">Authorize build</button>
+        <p class="muted">${cost} · ${s.months} mo in bay</p>
+        <button type="button" class="primary" data-build="${s.id}">Queue on ark</button>
       </div>`;
     })
     .join("");
   el.querySelectorAll("[data-build]").forEach((btn) => {
     btn.onclick = async () => {
       try {
+        // Keep ark selected so the queue stays visible
+        selectedUnitId = "ark";
         state = await api("/api/build", {
           method: "POST",
           body: JSON.stringify({ unit_kind: btn.dataset.build }),
         });
+        $("panel-left").classList.remove("collapsed");
         render();
       } catch (e) {
         alert(String(e.message || e).slice(0, 280));
       }
     };
   });
-  if (qel) {
-    const builds = state.builds || [];
-    qel.innerHTML = builds.length
-      ? builds
-          .map(
-            (j) =>
-              `<p class="muted">Building ${j.name}: ${j.months_left.toFixed(1)} / ${j.months_total} mo left</p>`
-          )
-          .join("")
-      : '<p class="empty">No fab jobs</p>';
-  }
 }
 
 function renderCatalog() {
@@ -256,17 +282,24 @@ function renderUnitPanel() {
   const el = $("unit-panel");
   if (!el || state.phase !== "system") return;
   const u = unitById(selectedUnitId);
-  if (!u) {
-    el.className = "empty";
-    el.textContent = "Select a unit";
+  // Ark uses fabrication bay instead of this generic card
+  if (!u || u.kind === "ark") {
+    el.hidden = !!u && u.kind === "ark";
+    if (!u) {
+      el.hidden = false;
+      el.className = "empty";
+      el.textContent = "Select a unit from the fleet list";
+    }
     return;
   }
+  el.hidden = false;
   const loc = bodyById(u.location_id);
   el.className = "card";
   el.innerHTML = `<h3>${u.name}</h3>
     <p>${u.kind} · ${(u.capabilities || []).join(", ")}</p>
     <p>@ ${loc ? loc.name : u.location_id}</p>
-    <p>${u.status}${u.order ? " / " + u.order : ""}</p>`;
+    <p>${u.status}${u.order ? " / " + u.order : ""}</p>
+    <p class="muted">Select a body on the map for orders.</p>`;
 }
 
 function renderBodyPanel() {
