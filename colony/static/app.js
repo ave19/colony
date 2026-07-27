@@ -87,6 +87,7 @@ function render() {
   }
 
   renderCatalog();
+  renderBuildUnits();
   renderFleet();
   renderUnitPanel();
   renderBodyPanel();
@@ -96,6 +97,50 @@ function render() {
   renderContracts();
   renderStock();
   renderEvents();
+}
+
+function renderBuildUnits() {
+  const el = $("build-units");
+  const qel = $("build-queue");
+  if (!el || state.phase !== "system") return;
+  const specs = state.unit_builds || {};
+  el.innerHTML = Object.values(specs)
+    .map((s) => {
+      const cost = Object.entries(s.cost || {})
+        .map(([k, v]) => `${v}t ${k}`)
+        .join(", ");
+      return `<div class="card">
+        <h3>${s.name}</h3>
+        <p>${s.description || ""}</p>
+        <p class="muted">${cost} · ${s.months} mo</p>
+        <button type="button" class="primary" data-build="${s.id}">Authorize build</button>
+      </div>`;
+    })
+    .join("");
+  el.querySelectorAll("[data-build]").forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        state = await api("/api/build", {
+          method: "POST",
+          body: JSON.stringify({ unit_kind: btn.dataset.build }),
+        });
+        render();
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 280));
+      }
+    };
+  });
+  if (qel) {
+    const builds = state.builds || [];
+    qel.innerHTML = builds.length
+      ? builds
+          .map(
+            (j) =>
+              `<p class="muted">Building ${j.name}: ${j.months_left.toFixed(1)} / ${j.months_total} mo left</p>`
+          )
+          .join("")
+      : '<p class="empty">No fab jobs</p>';
+  }
 }
 
 function renderCatalog() {
@@ -110,11 +155,13 @@ function renderCatalog() {
       const title = c.star.designation || c.star.name;
       const g =
         c.gas_giant_period_years != null ? ` · gas giant ~${c.gas_giant_period_years} y` : "";
+      const ds = c.dossier_id ? `<p class="muted">${c.dossier_id} · ${c.status || "on file"} · completeness ${c.completeness ?? "?"}</p>` : "";
       return `<div class="card">
         <h3>${title}</h3>
+        ${ds}
         <p>${c.survey_summary}</p>
         <p>Outer ~${c.outer_au ?? "?"} AU${g}</p>
-        <button class="primary" data-seed="${c.seed}">Commit transit</button>
+        <button class="primary" data-seed="${c.seed}">Commit to this dossier</button>
       </div>`;
     })
     .join("");

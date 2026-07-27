@@ -839,10 +839,16 @@ def _difficulty(star: dict, bodies: List[Body], snow: float) -> float:
     return min(10.0, max(1.0, score))
 
 
-def survey_catalog(n: int = 6) -> List[dict]:
-    out = []
-    for _ in range(n):
-        seed = random.randint(1, 10**9)
+def build_survey_archive(count: int = 8, universe_seed: int = 20260727) -> List[dict]:
+    """
+    Pre-existing remote survey dossiers for nearby stars.
+    Humanity is a going concern: these observations already exist in the archive.
+    Opening the archive views them; it does not invent systems on the click.
+    """
+    rng = random.Random(universe_seed)
+    out: List[dict] = []
+    for i in range(count):
+        seed = rng.randint(1, 10**9)
         sys = generate_system(seed=seed)
         giant = next((b for b in sys.bodies if b.planet_class == "gas_giant"), None)
         giant_years = None
@@ -852,6 +858,7 @@ def survey_catalog(n: int = 6) -> List[dict]:
             )
         out.append(
             {
+                "dossier_id": f"DS-{universe_seed % 10000:04d}-{i + 1:02d}",
                 "seed": sys.seed,
                 "star": sys.star,
                 "difficulty": round(sys.difficulty, 2),
@@ -862,6 +869,14 @@ def survey_catalog(n: int = 6) -> List[dict]:
                     max(b.semi_major_m / AU_M for b in sys.bodies if b.kind == "planet"), 1
                 ),
                 "gas_giant_period_years": giant_years,
+                "status": "remote survey on file",
+                "observed_from": "colonial deep-space network",
+                "completeness": round(rng.uniform(0.35, 0.75), 2),
             }
         )
     return out
+
+
+def survey_catalog(n: int = 6) -> List[dict]:
+    """Legacy alias — prefer build_survey_archive for going-concern dossiers."""
+    return build_survey_archive(count=n, universe_seed=random.randint(1, 10**9))

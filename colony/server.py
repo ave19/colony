@@ -73,8 +73,27 @@ def state():
 
 @app.post("/api/catalog")
 def catalog():
-    room().refresh_catalog()
+    """Open pre-existing survey archive (going-concern dossiers)."""
+    room().open_survey_archive()
     return room().snapshot()
+
+
+@app.post("/api/open_archive")
+def open_archive():
+    room().open_survey_archive()
+    return room().snapshot()
+
+
+class BuildBody(BaseModel):
+    unit_kind: str  # survey | miner | hauler
+
+
+@app.post("/api/build")
+def build_unit(body: BuildBody):
+    try:
+        return room().queue_build(body.unit_kind)
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @app.post("/api/select_star")

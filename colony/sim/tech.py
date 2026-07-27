@@ -265,9 +265,42 @@ def expand_base_plan(power_id: str, hab_id: str) -> dict:
     }
 
 
+# Units the ark can fabricate after arrival (materials + time — not pre-packed).
+UNIT_BUILDS = {
+    "survey": {
+        "id": "survey",
+        "name": "Survey satellite",
+        "kind": "survey",
+        "cost": {"steel": 8.0, "chip": 4.0, "panel": 2.0, "Al": 3.0},
+        "months": 1.5,
+        "capabilities": ["survey"],
+        "description": "Remote sensors and mapping suite. Built on-station from seed stock.",
+    },
+    "miner": {
+        "id": "miner",
+        "name": "Mining bot",
+        "kind": "miner",
+        "cost": {"steel": 15.0, "chip": 3.0, "panel": 1.0},
+        "months": 2.0,
+        "capabilities": ["mine"],
+        "description": "Surface/asteroid extractor. Needs a surveyed mine site before it can dig.",
+    },
+    "hauler": {
+        "id": "hauler",
+        "name": "Hauler",
+        "kind": "hauler",
+        "cost": {"steel": 25.0, "chip": 2.0, "chem_prop": 10.0, "Al": 5.0},
+        "months": 2.5,
+        "capabilities": ["haul"],
+        "description": "Chemical tug for orbital cargo. Propellant loaded at launch.",
+    },
+}
+
+
 def tech_book_summary() -> dict:
     return {
         "resources": RESOURCE_NAMES,
+        "unit_builds": UNIT_BUILDS,
         "buildings": {k: {"name": v.name, "cost": v.build_cost, "description": v.description} for k, v in BUILDINGS.items()},
         "recipes": {
             k: {
