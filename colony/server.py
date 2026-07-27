@@ -149,6 +149,14 @@ def order(body: OrderBody):
         raise HTTPException(400, str(e)) from e
 
 
+@app.post("/api/estimate_order")
+def estimate_order(body: OrderBody):
+    try:
+        return room().estimate_order(body.unit_id, body.order, body.target_id)
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/api/reset")
 def reset():
     game_mod.ROOM = game_mod.Game()

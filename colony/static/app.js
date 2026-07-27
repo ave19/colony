@@ -178,7 +178,7 @@ function renderBodyPanel() {
   `;
 }
 
-function renderOrders() {
+async function renderOrders() {
   const panel = $("orders-panel");
   const el = $("orders");
   if (!panel || !el || state.phase !== "system") return;
@@ -191,25 +191,57 @@ function renderOrders() {
   panel.hidden = false;
   const caps = u.capabilities || [];
   const busy = u.status !== "idle";
-  const btns = [];
 
-  const add = (order, label, needCap, disabledExtra = false) => {
-    const ok = !needCap || caps.includes(needCap);
-    btns.push(`<button type="button" class="order" data-order="${order}"
-      ${busy || !ok || disabledExtra ? "disabled" : ""}>${label}</button>`);
+  const est = async (order) => {
+    try {
+      return await api("/api/estimate_order", {
+        method: "POST",
+        body: JSON.stringify({ unit_id: u.id, order, target_id: b.id }),
+      });
+    } catch {
+      return null;
+    }
   };
 
-  add("move", `Move to ${b.name}`, null);
-  add("survey", `Survey ${b.name}`, "survey");
-  add(
-    "mine",
-    `Mine ${b.name}`,
-    "mine",
-    !(state.scanned || []).includes(b.id) && !(b.deposits || []).some((d) => d.known)
-  );
-  add("idle", "Cancel / stand by", null);
+  const [eMove, eSurvey, eMine] = await Promise.all([
+    est("move"),
+    est("survey"),
+    est("mine"),
+  ]);
 
-  el.innerHTML = btns.join("") + (busy ? `<p class="muted">Unit busy — warp to finish.</p>` : "");
+  const fmt = (e) => {
+    if (!e) return "";
+    if (e.years >= 0.5) return ` (~${e.years.toFixed(1)} y)`;
+    return ` (~${e.months.toFixed(1)} mo)`;
+  };
+
+  const surveyed =
+    (state.scanned || []).includes(b.id) || (b.deposits || []).some((d) => d.known);
+
+  const rows = [
+    { order: "move", label: `Move to ${b.name}${fmt(eMove)}`, need: null, dis: false },
+    { order: "survey", label: `Survey ${b.name}${fmt(eSurvey)}`, need: "survey", dis: false },
+    {
+      order: "mine",
+      label: `Mine ${b.name}${fmt(eMine)}`,
+      need: "mine",
+      dis: !surveyed,
+    },
+    { order: "idle", label: "Cancel / stand by", need: null, dis: false },
+  ];
+
+  el.innerHTML =
+    rows
+      .map((r) => {
+        const ok = !r.need || caps.includes(r.need);
+        return `<button type="button" class="order" data-order="${r.order}"
+          ${busy || !ok || r.dis ? "disabled" : ""}>${r.label}</button>`;
+      })
+      .join("") +
+    (busy
+      ? `<p class="muted">En route / working — use Warp to advance real transit time.</p>`
+      : `<p class="muted">Transit uses Hohmann-class coast (+ window). Survey sats are slower (low thrust).</p>`);
+
   el.querySelectorAll("[data-order]").forEach((btn) => {
     btn.onclick = async () => {
       try {

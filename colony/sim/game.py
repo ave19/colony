@@ -321,15 +321,103 @@ class Game:
         for u in units:
             self.fleet[u.id] = u
 
-    def _travel_months(self, from_id: str, to_id: str) -> float:
-        """Rough cruise time from orbital radii (economy transfer)."""
+    def _heliocentric_radius_m(self, body_id: str) -> float:
+        """Orbital radius about the star for travel planning (moons use parent planet)."""
+        assert self.system
+        if body_id in ("ark", "ark_orbit"):
+            site = self.sites.get("ark_orbit")
+            body_id = site.body_id if site else next(b.id for b in self.system.bodies if b.kind == "planet")
+        b = self.system.body_by_id(body_id)
+        if not b:
+            raise ValueError("unknown body")
+        if b.kind == "moon" and b.parent_id:
+            parent = self.system.body_by_id(b.parent_id)
+            return parent.semi_major_m if parent else b.semi_major_m
+        return b.semi_major_m
+
+    def _travel_months(self, from_id: str, to_id: str, unit_kind: str = "hauler") -> float:
+        """
+        Cruise time from orbital mechanics (Hohmann between heliocentric radii).
+        Survey sats are low-thrust → longer than a chemical hauler.
+        Same planet / local moon still takes real local time — no teleport.
+        """
+        from .orbits import hohmann_transfer
+        from .constants import DAYS_PER_MONTH, SECONDS_PER_DAY
+
+        assert self.system
         if from_id == to_id:
-            return 0.05
-        try:
-            opts = self.haul_options(from_id if from_id != "ark" else "ark", to_id)
-            return max(0.05, opts[0]["months"]) if opts else 1.0
-        except Exception:
-            return 1.0
+            # Already there: still not instant (station-keeping / phasing)
+            return 0.25 if unit_kind == "survey" else 0.1
+
+        fb = self.system.body_by_id(from_id) if from_id not in ("ark", "ark_orbit") else None
+        tb = self.system.body_by_id(to_id)
+
+        # Local transfer: same planet system (planet ↔ its moon, or moon ↔ moon of same parent)
+        def planet_key(body_id: str, body) -> Optional[str]:
+            if body is None and body_id in ("ark", "ark_orbit"):
+                site = self.sites.get("ark_orbit")
+                return site.body_id if site else None
+            if body is None:
+                return body_id
+            if body.kind == "moon":
+                return body.parent_id
+            return body.id
+
+        if tb and planet_key(from_id, fb) == planet_key(to_id, tb):
+            # Days–weeks to change moon orbits / lander loiter — not interplanetary
+            local = 0.4 if unit_kind == "survey" else 0.25
+            # Slightly longer if going to/from a different moon
+            if fb and tb and fb.kind == "moon" and tb.kind == "moon" and fb.id != tb.id:
+                local += 0.2
+            return local
+
+        r1 = self._heliocentric_radius_m(from_id)
+        r2 = self._heliocentric_radius_m(to_id)
+        # Avoid identical radii numerical issue
+        if abs(r1 - r2) / max(r1, r2) < 0.01:
+            return 0.5
+
+        _dv, tof_s = hohmann_transfer(r1, r2, self.system.star_mu)
+        months = tof_s / (SECONDS_PER_DAY * DAYS_PER_MONTH)
+
+        # Hohmann is the *minimum-energy* coast. Add synodic-ish wait fudge for departure
+        # window (player doesn't micro the date): ~10–20% of TOF, min 0.5 mo.
+        window = max(0.5, 0.15 * months)
+
+        # Low-thrust survey sats: longer than pure Hohmann chemical
+        if unit_kind == "survey":
+            months *= 1.65
+            window *= 1.1
+        elif unit_kind == "miner":
+            months *= 1.25
+
+        total = months + window
+        # Floor: even "nearby" neighbors take real time
+        return max(0.75, total)
+
+    def estimate_order(self, unit_id: str, order: str, target_id: str = "") -> dict:
+        """UI helper: how long will this order take?"""
+        u = self.fleet.get(unit_id)
+        if not u or not self.system:
+            return {"months": 0, "travel_months": 0, "work_months": 0}
+        work = 0.0
+        if order == "survey":
+            work = 0.75  # multi-week survey campaign, not a snapshot
+        elif order == "mine":
+            work = 1.0
+        elif order == "move":
+            work = 0.0
+        elif order == "idle":
+            return {"months": 0, "travel_months": 0, "work_months": 0}
+        travel = self._travel_months(u.location_id, target_id, u.kind) if target_id else 0.0
+        if order == "idle":
+            travel = 0.0
+        return {
+            "months": round(travel + work, 2),
+            "travel_months": round(travel, 2),
+            "work_months": round(work, 2),
+            "years": round((travel + work) / 12.0, 2),
+        }
 
     def issue_order(self, unit_id: str, order: str, target_id: str = "") -> dict:
         """
@@ -358,13 +446,17 @@ class Game:
             body = self.system.body_by_id(target_id)
             if not body:
                 raise ValueError("pick a body to survey")
-            travel = self._travel_months(u.location_id, target_id)
-            work = 0.15  # survey pass
+            est = self.estimate_order(unit_id, "survey", target_id)
             u.order = "survey"
             u.target_id = target_id
-            u.status = "en_route" if travel > 0.05 else "working"
-            u.months_left = travel + work
-            self._log("order", f"{u.name} → survey {body.name} ({u.months_left:.2f} mo).")
+            u.status = "en_route"
+            u.months_left = est["months"]
+            self._log(
+                "order",
+                f"{u.name} → survey {body.name}: "
+                f"{est['travel_months']:.1f} mo transit + {est['work_months']:.1f} mo survey "
+                f"(~{est['years']:.2f} y). Warp to resolve.",
+            )
             return self.snapshot()
 
         if order == "mine":
@@ -375,24 +467,31 @@ class Game:
                 raise ValueError("pick a body to mine")
             if target_id not in self.scanned and not any(d.known for d in body.deposits):
                 raise ValueError("survey this body before mining")
-            travel = self._travel_months(u.location_id, target_id)
+            est = self.estimate_order(unit_id, "mine", target_id)
             u.order = "mine"
             u.target_id = target_id
             u.status = "en_route"
-            u.months_left = travel + 0.5  # start a mining shift
-            self._log("order", f"{u.name} → mine {body.name}.")
+            u.months_left = est["months"]
+            self._log(
+                "order",
+                f"{u.name} → mine {body.name}: {est['travel_months']:.1f} mo transit "
+                f"+ {est['work_months']:.1f} mo shift (~{est['years']:.2f} y).",
+            )
             return self.snapshot()
 
         if order == "move":
             body = self.system.body_by_id(target_id)
             if not body:
                 raise ValueError("pick a destination")
-            travel = self._travel_months(u.location_id, target_id)
+            est = self.estimate_order(unit_id, "move", target_id)
             u.order = "move"
             u.target_id = target_id
             u.status = "en_route"
-            u.months_left = max(0.05, travel)
-            self._log("order", f"{u.name} → move to {body.name} ({u.months_left:.2f} mo).")
+            u.months_left = max(0.75, est["months"])
+            self._log(
+                "order",
+                f"{u.name} → {body.name}: {u.months_left:.1f} mo transit (~{u.months_left/12:.2f} y).",
+            )
             return self.snapshot()
 
         raise ValueError(f"unknown order {order}")
