@@ -521,9 +521,72 @@ details.drawer summary {
   color: var(--accent);
   letter-spacing: 0.04em;
 }
+.fleet-item.survey-item .name::after {
+  content: " · actions";
+  font-weight: 400;
+  font-size: 0.72rem;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+}
 .open-cascade-btn {
   width: 100%;
   margin-top: 8px;
+}
+
+/* Unit action cards inside cascade */
+.action-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.action-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(15, 24, 36, 0.95);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.action-card:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgba(21, 53, 84, 0.4);
+}
+.action-card:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.action-card.primary-action {
+  border-color: rgba(74, 163, 240, 0.45);
+  background: rgba(21, 53, 84, 0.35);
+}
+.action-card.danger-action {
+  border-color: rgba(180, 90, 70, 0.4);
+}
+.action-card.danger-action:hover:not(:disabled) {
+  border-color: #c86;
+  background: rgba(60, 28, 24, 0.45);
+}
+.action-title {
+  display: block;
+  font-weight: 650;
+  font-size: 0.95rem;
+  margin-bottom: 3px;
+}
+.action-desc {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+.cascade-mission {
+  margin-bottom: 14px;
+}
+.cascade-window.unit-card {
+  width: min(560px, calc(100vw - 32px));
 }
 
 @media (max-width: 700px) {

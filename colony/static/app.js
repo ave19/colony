@@ -162,9 +162,84 @@ function openArkCascade(tab) {
   renderSafe();
 }
 
+/** Open unit action card (survey probe, later miner/hauler). */
+function openUnitCascade(unitId, tab) {
+  const u = unitById(unitId);
+  if (!u) return;
+  selectedUnitId = unitId;
+  const defaultTab = u.kind === "survey" ? "actions" : "actions";
+  const keepTab =
+    cascade && cascade.kind === "unit" && cascade.unitId === unitId ? cascade.tab : null;
+  cascade = {
+    kind: "unit",
+    unitId,
+    tab: tab || keepTab || defaultTab,
+  };
+  renderSafe();
+}
+
 function closeCascade() {
   cascade = null;
   renderSafe();
+}
+
+async function issueUnitOrder(unitId, order, targetId = "", resource = "") {
+  state = await api("/api/order", {
+    method: "POST",
+    body: JSON.stringify({
+      unit_id: unitId,
+      order,
+      target_id: targetId,
+      resource: resource || "",
+    }),
+  });
+}
+
+function unitIsBusy(u) {
+  if (!u) return false;
+  return (
+    (u.status === "en_route" && u.months_left > 0) ||
+    (u.status === "working" && u.order === "mine") ||
+    (u.status === "working" && u.order === "survey")
+  );
+}
+
+function bodyPickerOptions(selectedId) {
+  const tree = state.body_tree || [];
+  const bodies = (state.system && state.system.bodies) || [];
+  // Prefer hierarchical labels; fall back to flat list
+  const opts = [];
+  for (const node of tree) {
+    if (node.kind === "belt_group") {
+      for (const a of node.asteroids || []) {
+        opts.push({ id: a.id, label: `  ${a.name}`, kind: "asteroid" });
+      }
+      continue;
+    }
+    opts.push({
+      id: node.id,
+      label: node.name,
+      kind: "planet",
+    });
+    for (const m of node.moons || []) {
+      opts.push({ id: m.id, label: `  ${m.name}`, kind: "moon" });
+    }
+  }
+  if (!opts.length) {
+    for (const b of bodies) {
+      opts.push({ id: b.id, label: b.name, kind: b.kind });
+    }
+  }
+  return opts
+    .map(
+      (o) =>
+        `<option value="${o.id}" ${o.id === selectedId ? "selected" : ""}>${o.label}</option>`
+    )
+    .join("");
+}
+
+function resName(id) {
+  return ((state.tech && state.tech.resources) || {})[id] || id;
 }
 
 function selectBody(id, { focus = true, openRight = true } = {}) {
@@ -299,7 +374,7 @@ function renderEventSchedule() {
     .join("");
 }
 
-/** Large command window cascade (ark console, later other hubs). */
+/** Large command window cascade (ark console, unit action cards). */
 function renderCascade() {
   const root = $("cascade");
   if (!root) return;
@@ -319,12 +394,357 @@ function renderCascade() {
     return;
   }
 
+  if (cascade.kind === "unit") {
+    const u = unitById(cascade.unitId);
+    if (!u) {
+      cascade = null;
+      root.hidden = true;
+      return;
+    }
+    if (u.kind === "survey") {
+      renderSurveyCascade(root, u);
+      return;
+    }
+    // Generic unit card fallback
+    renderGenericUnitCascade(root, u);
+    return;
+  }
+
   cascade = null;
   root.hidden = true;
 }
 
+function renderSurveyCascade(root, u) {
+  root.hidden = false;
+  root.querySelector(".cascade-window")?.classList.add("unit-card");
+  const tab = cascade.tab || "actions";
+  cascade.tab = tab;
+  const loc = bodyById(u.location_id);
+  const locName = loc ? loc.name : u.location_id;
+  const busy = unitIsBusy(u);
+  const resNames = (state.tech && state.tech.resources) || {};
+
+  let mission = "Standing by";
+  if (u.status === "en_route") {
+    const dest = bodyById(u.target_id);
+    const destName = dest ? dest.name : u.target_id;
+    if (u.order === "survey") {
+      const what = u.search_resource
+        ? resNames[u.search_resource] || u.search_resource
+        : "broad survey";
+      mission = `En route to ${destName} (${what}) · ${u.months_left?.toFixed(1) ?? "?"} mo`;
+    } else if (u.order === "move") {
+      mission = `Moving to ${destName} · ${u.months_left?.toFixed(1) ?? "?"} mo`;
+    } else {
+      mission = `En route · ${u.months_left?.toFixed(1) ?? "?"} mo`;
+    }
+  } else if (u.status === "working" && u.order === "survey") {
+    const what = u.search_resource
+      ? `seeking ${resNames[u.search_resource] || u.search_resource}`
+      : "broad composition";
+    const sm = u.search_resource
+      ? (loc && loc.seek_months && loc.seek_months[u.search_resource]) || 0
+      : (loc && loc.survey_months) || 0;
+    mission = `On station @ ${locName} · ${what} · ${Number(sm).toFixed(1)} mo`;
+  }
+
+  $("cascade-kicker").textContent = "Survey probe · action card";
+  $("cascade-title").textContent = u.name;
+  $("cascade-sub").textContent = mission;
+
+  const tabs = [
+    { id: "actions", label: "Actions" },
+    { id: "move", label: "Move" },
+    { id: "survey", label: "Survey focus" },
+  ];
+  $("cascade-tabs").innerHTML = tabs
+    .map(
+      (t) =>
+        `<button type="button" class="cascade-tab ${t.id === tab ? "active" : ""}" data-tab="${t.id}">${t.label}</button>`
+    )
+    .join("");
+  $("cascade-tabs").querySelectorAll("[data-tab]").forEach((btn) => {
+    btn.onclick = () => {
+      cascade = { kind: "unit", unitId: u.id, tab: btn.dataset.tab };
+      renderCascade();
+    };
+  });
+
+  const body = $("cascade-body");
+  if (tab === "move") body.innerHTML = surveyCascadeMoveHtml(u, loc);
+  else if (tab === "survey") body.innerHTML = surveyCascadeFocusHtml(u, loc);
+  else body.innerHTML = surveyCascadeActionsHtml(u, loc, mission, busy);
+
+  bindSurveyCascade(body, u, tab);
+}
+
+function surveyCascadeActionsHtml(u, loc, mission, busy) {
+  const locName = loc ? loc.name : u.location_id || "—";
+  const focus = u.search_resource
+    ? resName(u.search_resource)
+    : u.order === "survey"
+      ? "Broad composition"
+      : "—";
+  return `
+    <p class="cascade-section-lead">
+      Apply this probe’s sensors to a body: move there, set what to hunt for, and warp for progress.
+      Survey continues on-station until you stand by.
+    </p>
+    <div class="card cascade-mission">
+      <h3>Current mission</h3>
+      <p>${mission}</p>
+      <p class="muted">Location · ${locName}${u.search_resource || u.order === "survey" ? ` · focus ${focus}` : ""}</p>
+    </div>
+    <div class="action-stack">
+      <button type="button" class="action-card" data-goto="move">
+        <span class="action-title">Move to a new location</span>
+        <span class="action-desc">Transit to a planet, moon, or asteroid (real transfer time).</span>
+      </button>
+      <button type="button" class="action-card" data-goto="survey">
+        <span class="action-title">Change survey priorities</span>
+        <span class="action-desc">Broad scan or seek iron, ice, organics… on a chosen body.</span>
+      </button>
+      ${
+        loc
+          ? `<button type="button" class="action-card primary-action" data-quick-survey="${loc.id}" ${busy && !(u.status === "working" && u.order === "survey" && u.location_id === loc.id) ? "disabled" : ""}>
+        <span class="action-title">Survey here · ${loc.name}</span>
+        <span class="action-desc">Broad composition on current body (or re-task after stand by).</span>
+      </button>`
+          : ""
+      }
+      <button type="button" class="action-card danger-action" data-idle="1" ${u.status === "idle" && !u.order ? "disabled" : ""}>
+        <span class="action-title">Stand by / recall</span>
+        <span class="action-desc">Stop surveying or cancel assignment. Free for a new order.</span>
+      </button>
+    </div>
+  `;
+}
+
+function surveyCascadeMoveHtml(u, loc) {
+  const destDefault = selectedBodyId || u.location_id || "";
+  return `
+    <p class="cascade-section-lead">
+      Choose a destination. Travel uses orbital transfer times (not teleport). After arrival the probe waits idle until you set a survey focus.
+    </p>
+    <div class="card">
+      <label>Destination body
+        <select id="sv-move-dest">${bodyPickerOptions(destDefault)}</select>
+      </label>
+      <p class="muted" id="sv-move-est" style="margin-top:8px">Estimating transit…</p>
+      <button type="button" class="primary" id="sv-move-go" style="width:100%;margin-top:12px">
+        Order move
+      </button>
+    </div>
+    <p class="muted">Currently @ ${loc ? loc.name : u.location_id || "—"}</p>
+  `;
+}
+
+function surveyCascadeFocusHtml(u, loc) {
+  const targetDefault = selectedBodyId || u.location_id || "";
+  const b = bodyById(targetDefault);
+  const searchable = (b && b.searchable_resources) || ["Fe", "Si", "Al", "H2O", "CH4"];
+  const exhausted = new Set((b && b.seek_exhausted) || []);
+  const foundRes = new Set(((b && b.mine_sites) || []).map((s) => s.resource));
+  const current = u.search_resource || "";
+
+  const resBtns = searchable
+    .map((res) => {
+      const name = resName(res);
+      let note = "";
+      let disabled = false;
+      if (foundRes.has(res)) {
+        note = "site found";
+        disabled = true;
+      } else if (exhausted.has(res)) {
+        note = "none here";
+        disabled = true;
+      }
+      const active = current === res ? "active" : "";
+      return `<button type="button" class="goal-toggle ${active}" data-res="${res}" ${disabled ? "disabled" : ""}>
+        <span>
+          <div class="g-title">Find sources of ${name}</div>
+          <div class="g-desc">${note || "Directed search on the selected body"}</div>
+        </span>
+      </button>`;
+    })
+    .join("");
+
+  return `
+    <p class="cascade-section-lead">
+      Pick where to work and what to look for. Changing focus while surveying will stand by first, then re-task.
+    </p>
+    <div class="card">
+      <label>Target body
+        <select id="sv-focus-body">${bodyPickerOptions(targetDefault)}</select>
+      </label>
+      <p class="muted" id="sv-focus-hint" style="margin-top:8px">
+        ${b ? `${b.kind}${b.planet_class ? " / " + b.planet_class : ""} · ${b.survey_months != null ? b.survey_months.toFixed(1) + " mo surveyed" : ""}` : "Select a body"}
+      </p>
+    </div>
+    <h2>Priorities on this body</h2>
+    <div class="priority-grid" id="sv-focus-list">
+      <button type="button" class="goal-toggle ${!current && u.order === "survey" ? "active" : ""}" data-res="">
+        <span>
+          <div class="g-title">Broad composition survey</div>
+          <div class="g-desc">General intel until mine sites appear</div>
+        </span>
+      </button>
+      ${resBtns}
+    </div>
+  `;
+}
+
+function bindSurveyCascade(bodyEl, u, tab) {
+  const reOpen = (t) => {
+    cascade = { kind: "unit", unitId: u.id, tab: t || tab };
+    render();
+  };
+
+  bodyEl.querySelectorAll("[data-goto]").forEach((btn) => {
+    btn.onclick = () => {
+      cascade = { kind: "unit", unitId: u.id, tab: btn.dataset.goto };
+      renderCascade();
+    };
+  });
+
+  const idleBtn = bodyEl.querySelector("[data-idle]");
+  if (idleBtn) {
+    idleBtn.onclick = async () => {
+      try {
+        await issueUnitOrder(u.id, "idle");
+        reOpen("actions");
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 280));
+      }
+    };
+  }
+
+  const quick = bodyEl.querySelector("[data-quick-survey]");
+  if (quick) {
+    quick.onclick = async () => {
+      try {
+        const target = quick.dataset.quickSurvey;
+        if (u.status === "working" && u.order === "survey") {
+          await issueUnitOrder(u.id, "idle");
+        }
+        await issueUnitOrder(u.id, "survey", target, "");
+        reOpen("actions");
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 280));
+      }
+    };
+  }
+
+  if (tab === "move") {
+    const destSel = bodyEl.querySelector("#sv-move-dest");
+    const estEl = bodyEl.querySelector("#sv-move-est");
+    const go = bodyEl.querySelector("#sv-move-go");
+    const updateEst = async () => {
+      if (!destSel || !estEl) return;
+      try {
+        const est = await api("/api/estimate_order", {
+          method: "POST",
+          body: JSON.stringify({
+            unit_id: u.id,
+            order: "move",
+            target_id: destSel.value,
+          }),
+        });
+        if (est.years >= 0.5) {
+          estEl.textContent = `Transit ~${est.years.toFixed(2)} years (${est.months.toFixed(1)} mo)`;
+        } else if (est.months >= 1) {
+          estEl.textContent = `Transit ~${est.months.toFixed(1)} months`;
+        } else {
+          estEl.textContent = `Transit ~${Math.max(1, Math.round(est.months * 30))} days`;
+        }
+      } catch (_) {
+        estEl.textContent = "Could not estimate transit.";
+      }
+    };
+    if (destSel) destSel.onchange = updateEst;
+    updateEst();
+    if (go) {
+      go.onclick = async () => {
+        try {
+          if (unitIsBusy(u) && u.order === "survey") {
+            await issueUnitOrder(u.id, "idle");
+          }
+          await issueUnitOrder(u.id, "move", destSel.value);
+          selectedBodyId = destSel.value;
+          reOpen("actions");
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 280));
+        }
+      };
+    }
+  }
+
+  if (tab === "survey") {
+    const bodySel = bodyEl.querySelector("#sv-focus-body");
+    if (bodySel) {
+      bodySel.onchange = () => {
+        selectedBodyId = bodySel.value;
+        // Re-render focus tab with new body's searchable resources
+        cascade = { kind: "unit", unitId: u.id, tab: "survey" };
+        renderCascade();
+      };
+    }
+    bodyEl.querySelectorAll("[data-res]").forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          const target = bodySel ? bodySel.value : u.location_id;
+          const res = btn.dataset.res || "";
+          if (unitIsBusy(u)) {
+            await issueUnitOrder(u.id, "idle");
+          }
+          await issueUnitOrder(u.id, "survey", target, res);
+          selectedBodyId = target;
+          reOpen("actions");
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 280));
+        }
+      };
+    });
+  }
+}
+
+function renderGenericUnitCascade(root, u) {
+  root.hidden = false;
+  root.querySelector(".cascade-window")?.classList.add("unit-card");
+  cascade.tab = "actions";
+  const loc = bodyById(u.location_id);
+  $("cascade-kicker").textContent = `${u.kind} · action card`;
+  $("cascade-title").textContent = u.name;
+  $("cascade-sub").textContent = `${u.status}${u.order ? " / " + u.order : ""} · @ ${
+    loc ? loc.name : u.location_id
+  }`;
+  $("cascade-tabs").innerHTML = `<button type="button" class="cascade-tab active" data-tab="actions">Actions</button>`;
+  $("cascade-body").innerHTML = `
+    <p class="cascade-section-lead">Select a body on the map or bodies list, then use the Tasks panel for orders.</p>
+    <div class="action-stack">
+      <button type="button" class="action-card danger-action" id="gen-idle">
+        <span class="action-title">Stand by</span>
+        <span class="action-desc">Clear current assignment if any.</span>
+      </button>
+    </div>
+  `;
+  const idle = $("gen-idle");
+  if (idle) {
+    idle.onclick = async () => {
+      try {
+        await issueUnitOrder(u.id, "idle");
+        cascade = { kind: "unit", unitId: u.id, tab: "actions" };
+        render();
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 280));
+      }
+    };
+  }
+}
+
 function renderArkCascade(root) {
   root.hidden = false;
+  root.querySelector(".cascade-window")?.classList.remove("unit-card");
   const tab = cascade.tab || "survey";
   cascade.tab = tab;
 
@@ -629,15 +1049,17 @@ function renderFleet() {
     .map((u) => {
       const loc = bodyById(u.location_id);
       const isArk = u.kind === "ark";
+      const isSurvey = u.kind === "survey";
+      const opensCard = isArk || isSurvey;
       const busy =
         u.status !== "idle"
           ? `<div class="meta busy">${u.status} ${u.order || ""} ${u.months_left ? u.months_left + " mo" : ""}</div>`
           : `<div class="meta">@ ${loc ? loc.name : u.location_id}${
-              isArk ? " · click to open console" : ""
+              opensCard ? " · click for actions" : ""
             }</div>`;
       return `<button type="button" class="fleet-item ${isArk ? "ark-item" : ""} ${
-        selectedUnitId === u.id ? "selected" : ""
-      }" data-unit="${u.id}">
+        isSurvey ? "survey-item" : ""
+      } ${selectedUnitId === u.id ? "selected" : ""}" data-unit="${u.id}">
         <div class="name">${u.name}</div>
         <div class="meta">${u.kind}</div>${busy}
       </button>`;
@@ -651,9 +1073,10 @@ function renderFleet() {
       $("panel-left").classList.remove("collapsed");
       if (u && u.kind === "ark") {
         openArkCascade();
+      } else if (u && u.kind === "survey") {
+        openUnitCascade(u.id, "actions");
       } else {
-        // Close ark console when focusing a field unit
-        if (cascade && cascade.kind === "ark") cascade = null;
+        if (cascade) cascade = null;
         render();
       }
     };
@@ -687,6 +1110,20 @@ function renderUnitPanel() {
       </button>`;
     const b = $("btn-open-ark");
     if (b) b.onclick = () => openArkCascade();
+    return;
+  }
+  if (u.kind === "survey") {
+    el.hidden = false;
+    el.className = "card";
+    const loc = bodyById(u.location_id);
+    el.innerHTML = `<h3>${u.name}</h3>
+      <p class="muted">Survey probe · move, focus, stand by</p>
+      <p>@ ${loc ? loc.name : u.location_id} · ${u.status}${u.order ? " / " + u.order : ""}</p>
+      <button type="button" class="primary open-cascade-btn" id="btn-open-survey">
+        Open probe actions
+      </button>`;
+    const b = $("btn-open-survey");
+    if (b) b.onclick = () => openUnitCascade(u.id, "actions");
     return;
   }
   el.hidden = false;
