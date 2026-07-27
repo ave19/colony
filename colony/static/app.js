@@ -79,16 +79,17 @@ function render() {
 
   // 3D map (optional if WebGL/init failed)
   if (map) {
+    const simSec = (state.sim_months || 0) * 30 * 86400; // game month = 30 days
     if (state.phase === "system" && state.system) {
       if (!map.systemData || map.systemData.seed !== state.system.seed) {
-        map.setSystem(state.system);
+        map.setSystem(state.system, simSec);
         map.focusSystem();
       } else {
-        map.updatePositions(state.system);
+        map.updatePositions(state.system, simSec);
       }
       if (selectedBodyId) map.setSelected(selectedBodyId);
       $("map-hint").textContent =
-        "Drag orbit · Scroll zoom · Click select · Double-click focus planet (see moons)";
+        "Drag orbit · Scroll zoom · Click select · Double-click focus (tracks target) · moons no longer jump";
     } else if (state.phase !== "system") {
       map.clearSystem();
       $("map-hint").textContent =
@@ -284,7 +285,7 @@ function renderBodyPanel() {
     <p>${sites || '<span class="muted">None — keep surveying</span>'}</p>
   `;
   const fb = $("btn-focus-body");
-  if (fb) fb.onclick = () => map.focusBody(b.id);
+  if (fb) fb.onclick = () => map && map.focusBody(b.id);
 }
 
 async function renderOrders() {
@@ -466,9 +467,11 @@ function renderEvents() {
     .join("");
 }
 
-// Panel toggles
+// Panel toggles — open left by default on menu so archive is findable
 $("toggle-left").onclick = () => $("panel-left").classList.toggle("collapsed");
 $("toggle-right").onclick = () => $("panel-right").classList.toggle("collapsed");
+// Start with left panel open so "View survey results" is obvious
+$("panel-left").classList.remove("collapsed");
 
 $("btn-catalog").onclick = async () => {
   state = await api("/api/catalog", { method: "POST", body: "{}" });
@@ -517,7 +520,8 @@ $("btn-focus-sel").onclick = () => {
       state = await api("/api/state");
       render();
       if (map && state?.system && prevSeed === state.system.seed) {
-        map.updatePositions(state.system);
+        const simSec = (state.sim_months || 0) * 30 * 86400;
+        map.updatePositions(state.system, simSec);
       }
     } catch (_) {}
   }, 3000);

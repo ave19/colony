@@ -1,21 +1,30 @@
 /**
- * Simple Three.js system map: orbit / zoom / pan, focus planet to see moons.
- * Distances use a dual scale: heliocentric sqrt(AU), local moon rings exaggerated when focused.
+ * Simple Three.js system map: orbit / zoom / pan, focus + track moving targets.
+ * Positions animate smoothly from Keplerian phase + period (not discrete poll jumps).
+ * Distances: heliocentric sqrt(AU); moons on exaggerated local rings when focused.
  */
 import * as THREE from "/static/vendor/three/three.module.js";
 import { OrbitControls } from "/static/vendor/three/addons/controls/OrbitControls.js";
 
-const AU_SCALE = 12; // scene units per sqrt(AU) at system scale
+const AU_SCALE = 12; // scene units per sqrt(AU)
+// Match server catch-up: 1 wall second ≈ 1 game day / 7
+const GAME_SECONDS_PER_WALL = 86400 / 7;
 
 export class SystemMap3D {
   constructor(canvas) {
     this.canvas = canvas;
-    this.bodyMeshes = new Map(); // id -> { mesh, data, kind }
-    this.focusId = null; // null = system view
+    this.bodyMeshes = new Map();
+    this.focusId = null;
     this.selectedId = null;
     this.systemData = null;
+    this.trackFocus = true; // telescope tracking
     this.onSelect = null;
     this.onFocus = null;
+
+    // Visual clock: synced from server, advances smoothly between polls
+    this._syncSimSeconds = 0;
+    this._syncWallMs = performance.now();
+    this._visualSimSeconds = 0;
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -34,10 +43,7 @@ export class SystemMap3D {
     this.controls.maxDistance = 200;
     this.controls.target.set(0, 0, 0);
 
-    // Starfield
     this._addStars();
-
-    // Lights
     this.scene.add(new THREE.AmbientLight(0x334455, 0.55));
     this.sunLight = new THREE.PointLight(0xfff0d0, 2.2, 0, 0);
     this.scene.add(this.sunLight);
@@ -47,7 +53,6 @@ export class SystemMap3D {
 
     this.raycaster = new THREE.Raycaster();
     this.pointer = new THREE.Vector2();
-    this._clock = new THREE.Clock();
 
     this._onResize = () => this.resize();
     window.addEventListener("resize", this._onResize);
@@ -56,7 +61,12 @@ export class SystemMap3D {
 
     this.resize();
     this._anim = () => {
+      this._tickVisualTime();
+      this._layoutBodies();
+      this._trackFocusCamera();
       this.controls.update();
+      // re-apply track after controls so damping doesn't leave target behind
+      this._trackFocusCamera();
       this.renderer.render(this.scene, this.camera);
       this._raf = requestAnimationFrame(this._anim);
     };
@@ -79,6 +89,19 @@ export class SystemMap3D {
     this.camera.updateProjectionMatrix();
   }
 
+  /** Sync visual clock from server sim time (seconds). */
+  setSimTimeSeconds(simSeconds) {
+    const s = Number(simSeconds) || 0;
+    this._syncSimSeconds = s;
+    this._syncWallMs = performance.now();
+    this._visualSimSeconds = s;
+  }
+
+  _tickVisualTime() {
+    const wallDt = (performance.now() - this._syncWallMs) / 1000;
+    this._visualSimSeconds = this._syncSimSeconds + wallDt * GAME_SECONDS_PER_WALL;
+  }
+
   _addStars() {
     const n = 2500;
     const pos = new Float32Array(n * 3);
@@ -96,12 +119,27 @@ export class SystemMap3D {
     this.scene.add(new THREE.Points(geo, mat));
   }
 
-  /** Heliocentric position in scene units from true AU coords */
-  heliocentric(x_au, y_au) {
-    const r = Math.hypot(x_au, y_au);
-    if (r < 1e-12) return new THREE.Vector3(0, 0, 0);
+  heliocentricFromPhase(a_au, phase) {
+    const r = Math.max(a_au, 1e-12);
     const pr = Math.sqrt(r) * AU_SCALE;
-    return new THREE.Vector3((x_au / r) * pr, 0, (y_au / r) * pr);
+    return new THREE.Vector3(Math.cos(phase) * pr, 0, Math.sin(phase) * pr);
+  }
+
+  _periodSeconds(b) {
+    if (b.period_days && b.period_days > 0) return b.period_days * 86400;
+    if (b.period_years && b.period_years > 0) return b.period_years * 365.25 * 86400;
+    return 365.25 * 86400; // fallback 1 y
+  }
+
+  _phaseAt(b, tSec) {
+    const P = this._periodSeconds(b);
+    const omega = (Math.PI * 2) / P;
+    const phase0 = b.phase0 != null ? b.phase0 : 0;
+    // Prefer continuous phase0+omega*t; if server only gave current phase at sync, use that as epoch
+    if (b._phaseEpoch != null && b._epochT != null) {
+      return b._phaseEpoch + omega * (tSec - b._epochT);
+    }
+    return phase0 + omega * tSec;
   }
 
   clearSystem() {
@@ -120,17 +158,16 @@ export class SystemMap3D {
     this.systemData = null;
   }
 
-  setSystem(system) {
+  setSystem(system, simSeconds = 0) {
     this.clearSystem();
     this.systemData = system;
+    this.setSimTimeSeconds(simSeconds);
     if (!system) return;
 
-    // Star
     const starMat = new THREE.MeshBasicMaterial({ color: 0xffd27a });
     const star = new THREE.Mesh(new THREE.SphereGeometry(0.55, 32, 32), starMat);
     star.userData = { bodyId: "star", kind: "star" };
     this.root.add(star);
-    // glow
     const glow = new THREE.Mesh(
       new THREE.SphereGeometry(0.9, 16, 16),
       new THREE.MeshBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0.2 })
@@ -141,18 +178,14 @@ export class SystemMap3D {
     const planets = bodies.filter((b) => b.kind === "planet" || b.kind === "asteroid");
     const moons = bodies.filter((b) => b.kind === "moon");
 
-    // Orbit rings (heliocentric)
     for (const b of planets) {
       const a = b.semi_major_au || 0;
       if (a <= 0) continue;
       const radius = Math.sqrt(a) * AU_SCALE;
-      const ring = this._makeRing(radius, b.kind === "asteroid" ? 0x333844 : 0x1a2838);
-      this.root.add(ring);
+      this.root.add(this._makeRing(radius, b.kind === "asteroid" ? 0x333844 : 0x1a2838));
     }
 
-    // Planets / asteroids
     for (const b of planets) {
-      const pos = this.heliocentric(b.x_au || 0, b.y_au || 0);
       let radius = 0.12;
       let color = 0x9aa7b5;
       if (b.kind === "planet") {
@@ -172,89 +205,189 @@ export class SystemMap3D {
       }
       const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(radius, 24, 24),
-        new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.15 })
+        new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.15, emissive: 0x000000 })
       );
-      mesh.position.copy(pos);
       mesh.userData = { bodyId: b.id, kind: b.kind };
       this.root.add(mesh);
-      this.bodyMeshes.set(b.id, { mesh, data: b, kind: b.kind, baseScale: 1 });
-
-      // Label sprite (simple canvas)
       const label = this._makeLabel(b.name);
-      label.position.copy(pos).add(new THREE.Vector3(0, radius + 0.25, 0));
-      label.userData = { bodyId: b.id, isLabel: true };
       this.root.add(label);
-      this.bodyMeshes.get(b.id).label = label;
+      // Epoch from server current phase so animation continues smoothly
+      const orb = {
+        ...b,
+        _phaseEpoch: b.phase != null ? b.phase : b.phase0 || 0,
+        _epochT: this._visualSimSeconds,
+      };
+      this.bodyMeshes.set(b.id, {
+        mesh,
+        label,
+        data: orb,
+        kind: b.kind,
+        a_au: b.semi_major_au || 0,
+        lift: radius + 0.25,
+      });
     }
 
-    // Moons — attached near parent; visible when camera is close / focused
     for (const b of moons) {
       const parent = planets.find((p) => p.id === b.parent_id);
       if (!parent) continue;
-      const parentPos = this.heliocentric(parent.x_au || 0, parent.y_au || 0);
-      // Local moon ring: scale so moons are readable when focused on parent
       const localR = 0.55 + (b.display_orbit_au || 0.03) * 8;
-      const phase = b.phase || 0;
-      const pos = parentPos
-        .clone()
-        .add(new THREE.Vector3(Math.cos(phase) * localR, Math.sin(phase) * 0.15 * localR, Math.sin(phase) * localR));
-
       const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(0.07, 16, 16),
-        new THREE.MeshStandardMaterial({ color: 0xb8c0c8, roughness: 0.85 })
+        new THREE.MeshStandardMaterial({ color: 0xb8c0c8, roughness: 0.85, emissive: 0x000000 })
       );
-      mesh.position.copy(pos);
       mesh.userData = { bodyId: b.id, kind: "moon", parentId: b.parent_id };
       this.root.add(mesh);
-
-      // subtle moon orbit ring around parent (only useful when zoomed)
-      const mring = this._makeRing(localR, 0x2a3545, parentPos);
-      mring.userData = { moonRingFor: b.parent_id };
+      const mring = this._makeRing(localR, 0x2a3545);
+      mring.userData = { moonRingFor: b.parent_id, localR };
       this.root.add(mring);
-
       const label = this._makeLabel(b.name, 0.55);
-      label.position.copy(pos).add(new THREE.Vector3(0, 0.14, 0));
       this.root.add(label);
-      this.bodyMeshes.set(b.id, { mesh, data: b, kind: "moon", label, parentId: b.parent_id });
+      const orb = {
+        ...b,
+        _phaseEpoch: b.phase != null ? b.phase : b.phase0 || 0,
+        _epochT: this._visualSimSeconds,
+      };
+      this.bodyMeshes.set(b.id, {
+        mesh,
+        label,
+        data: orb,
+        kind: "moon",
+        parentId: b.parent_id,
+        localR,
+        lift: 0.14,
+      });
     }
 
+    this._layoutBodies();
     this._updateSelectionVisual();
     this._updateFocusVisibility();
   }
 
-  /** Update positions when sim state refreshes (same system). */
-  updatePositions(system) {
+  /**
+   * Soft-sync from server: update orbital epochs without teleporting.
+   * Blends phase if close; hard-snaps only on large discontinuities (warp).
+   */
+  updatePositions(system, simSeconds = null) {
     if (!system || !this.systemData) return;
     this.systemData = system;
+    if (simSeconds != null) {
+      const s = Number(simSeconds) || 0;
+      const predicted = this._visualSimSeconds;
+      // If server jumped forward (warp), snap visual clock
+      if (s > predicted + 3600 || s < predicted - 60) {
+        this.setSimTimeSeconds(s);
+      } else {
+        // gentle resync
+        this._syncSimSeconds = s;
+        this._syncWallMs = performance.now();
+      }
+    }
     const bodies = system.bodies || [];
     const byId = Object.fromEntries(bodies.map((b) => [b.id, b]));
+    const t = this._visualSimSeconds;
 
     for (const [id, entry] of this.bodyMeshes) {
       const b = byId[id];
       if (!b) continue;
-      entry.data = b;
-      let pos;
-      if (b.kind === "moon") {
-        const parent = byId[b.parent_id];
-        if (!parent) continue;
-        const parentPos = this.heliocentric(parent.x_au || 0, parent.y_au || 0);
-        const localR = 0.55 + (b.display_orbit_au || 0.03) * 8;
-        const phase = b.phase || 0;
-        pos = parentPos
-          .clone()
-          .add(new THREE.Vector3(Math.cos(phase) * localR, Math.sin(phase) * 0.15 * localR, Math.sin(phase) * localR));
+      const serverPhase = b.phase != null ? b.phase : b.phase0 || 0;
+      const P = this._periodSeconds(b);
+      const omega = (Math.PI * 2) / P;
+      // Current visual phase
+      const visPhase = this._phaseAt(entry.data, t);
+      let dPhase = serverPhase - visPhase;
+      // wrap to [-pi, pi]
+      dPhase = ((dPhase + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+      if (Math.abs(dPhase) > 0.5) {
+        // large jump (warp): snap
+        entry.data = {
+          ...b,
+          _phaseEpoch: serverPhase,
+          _epochT: t,
+        };
       } else {
-        pos = this.heliocentric(b.x_au || 0, b.y_au || 0);
+        // small correction: ease epoch toward server
+        entry.data = {
+          ...entry.data,
+          ...b,
+          _phaseEpoch: visPhase + dPhase * 0.25,
+          _epochT: t,
+          period_days: b.period_days,
+          period_years: b.period_years,
+          phase0: b.phase0,
+          semi_major_au: b.semi_major_au,
+          display_orbit_au: b.display_orbit_au,
+        };
       }
-      entry.mesh.position.copy(pos);
-      if (entry.label) {
-        const lift = b.kind === "moon" ? 0.14 : 0.28;
-        entry.label.position.copy(pos).add(new THREE.Vector3(0, lift, 0));
+      if (entry.kind !== "moon") {
+        entry.a_au = b.semi_major_au || entry.a_au;
+      } else {
+        entry.localR = 0.55 + (b.display_orbit_au || 0.03) * 8;
+        entry.parentId = b.parent_id;
       }
     }
   }
 
-  _makeRing(radius, color, center = null) {
+  _layoutBodies() {
+    if (!this.bodyMeshes.size) return;
+    const t = this._visualSimSeconds;
+    const parentPos = new Map();
+
+    // Planets first
+    for (const [id, entry] of this.bodyMeshes) {
+      if (entry.kind === "moon") continue;
+      const phase = this._phaseAt(entry.data, t);
+      const pos = this.heliocentricFromPhase(entry.a_au || 0, phase);
+      entry.mesh.position.copy(pos);
+      if (entry.label) {
+        entry.label.position.copy(pos).add(new THREE.Vector3(0, entry.lift || 0.3, 0));
+      }
+      parentPos.set(id, pos);
+    }
+
+    // Moons relative to parents
+    for (const [id, entry] of this.bodyMeshes) {
+      if (entry.kind !== "moon") continue;
+      const ppos = parentPos.get(entry.parentId) || new THREE.Vector3();
+      const phase = this._phaseAt(entry.data, t);
+      const localR = entry.localR || 0.7;
+      const pos = ppos
+        .clone()
+        .add(
+          new THREE.Vector3(
+            Math.cos(phase) * localR,
+            Math.sin(phase) * 0.12 * localR,
+            Math.sin(phase) * localR
+          )
+        );
+      entry.mesh.position.copy(pos);
+      if (entry.label) {
+        entry.label.position.copy(pos).add(new THREE.Vector3(0, entry.lift || 0.14, 0));
+      }
+    }
+
+    // Moon rings follow parents
+    this.root.traverse((o) => {
+      if (o.userData?.moonRingFor) {
+        const p = parentPos.get(o.userData.moonRingFor);
+        if (p) o.position.copy(p);
+      }
+    });
+  }
+
+  /** Keep focus target locked; camera rides with it (telescope tracking). */
+  _trackFocusCamera() {
+    if (!this.trackFocus || !this.focusId) return;
+    const entry = this.bodyMeshes.get(this.focusId);
+    if (!entry) return;
+    const bodyPos = entry.mesh.position;
+    const offset = this.camera.position.clone().sub(this.controls.target);
+    // avoid zero offset
+    if (offset.lengthSq() < 1e-6) offset.set(2.2, 1.4, 2.8);
+    this.controls.target.copy(bodyPos);
+    this.camera.position.copy(bodyPos).add(offset);
+  }
+
+  _makeRing(radius, color) {
     const pts = [];
     const n = 128;
     for (let i = 0; i <= n; i++) {
@@ -263,9 +396,7 @@ export class SystemMap3D {
     }
     const geo = new THREE.BufferGeometry().setFromPoints(pts);
     const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.55 });
-    const line = new THREE.Line(geo, mat);
-    if (center) line.position.copy(center);
-    return line;
+    return new THREE.Line(geo, mat);
   }
 
   _makeLabel(text, scale = 0.7) {
@@ -291,33 +422,33 @@ export class SystemMap3D {
   }
 
   focusBody(id) {
-    this.focusId = id;
-    const entry = id ? this.bodyMeshes.get(id) : null;
-    if (!entry) {
-      // system view
+    if (!id) {
       this.focusId = null;
       this.controls.target.set(0, 0, 0);
       this.camera.position.set(0, 28, 48);
       this.controls.minDistance = 0.8;
+      this.controls.maxDistance = 200;
       this.controls.update();
       this._updateFocusVisibility();
       if (this.onFocus) this.onFocus(null);
       return;
     }
-    // If moon, focus parent planet for context
-    let targetEntry = entry;
+
     let targetId = id;
-    if (entry.kind === "moon" && entry.parentId) {
-      const p = this.bodyMeshes.get(entry.parentId);
-      if (p) {
-        targetEntry = p;
-        targetId = entry.parentId;
-        this.focusId = targetId;
-      }
+    const entry = this.bodyMeshes.get(id);
+    if (entry?.kind === "moon" && entry.parentId) {
+      targetId = entry.parentId;
     }
-    const p = targetEntry.mesh.position;
+    this.focusId = targetId;
+    const targetEntry = this.bodyMeshes.get(targetId);
+    if (!targetEntry) {
+      this.focusId = null;
+      return;
+    }
+
+    this._layoutBodies();
+    const p = targetEntry.mesh.position.clone();
     this.controls.target.copy(p);
-    // Pull camera in so moons of a giant are readable
     const offset = new THREE.Vector3(2.2, 1.4, 2.8);
     this.camera.position.copy(p).add(offset);
     this.controls.minDistance = 0.2;
@@ -329,21 +460,19 @@ export class SystemMap3D {
 
   focusSystem() {
     this.focusBody(null);
-    this.controls.maxDistance = 200;
   }
 
   _updateSelectionVisual() {
     for (const [, entry] of this.bodyMeshes) {
       const sel = entry.mesh.userData.bodyId === this.selectedId;
       if (entry.mesh.material && entry.mesh.material.emissive) {
-        entry.mesh.material.emissive = new THREE.Color(sel ? 0x1a4a7a : 0x000000);
+        entry.mesh.material.emissive.setHex(sel ? 0x1a4a7a : 0x000000);
         entry.mesh.material.emissiveIntensity = sel ? 0.55 : 0;
       }
     }
   }
 
   _updateFocusVisibility() {
-    // In system view, hide moon labels far away; when focused on a planet, emphasize its moons
     const focus = this.focusId;
     for (const [, entry] of this.bodyMeshes) {
       if (entry.kind !== "moon") {
@@ -351,22 +480,13 @@ export class SystemMap3D {
         continue;
       }
       const parentFocused = focus && entry.parentId === focus;
-      const systemView = !focus;
-      // Moons always rendered; labels only when parent focused or camera close
-      if (entry.label) entry.label.visible = parentFocused;
+      if (entry.label) entry.label.visible = !!parentFocused;
       entry.mesh.visible = true;
-      // scale moons up slightly when parent focused
-      const s = parentFocused ? 1.6 : systemView ? 0.85 : 1;
-      entry.mesh.scale.setScalar(s);
+      entry.mesh.scale.setScalar(parentFocused ? 1.6 : 0.85);
     }
     this.root.traverse((o) => {
       if (o.userData?.moonRingFor) {
         o.visible = !focus || o.userData.moonRingFor === focus;
-        if (focus && o.userData.moonRingFor === focus) {
-          // re-center ring on parent
-          const p = this.bodyMeshes.get(focus);
-          if (p) o.position.copy(p.mesh.position);
-        }
       }
     });
   }
@@ -385,7 +505,6 @@ export class SystemMap3D {
 
   _onPointerDown(event) {
     if (event.button !== 0) return;
-    // ignore drag clicks: record and check on pointerup-ish via small move
     const id = this._pick(event);
     this._downId = id;
     this._downX = event.clientX;
