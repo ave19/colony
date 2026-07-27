@@ -227,10 +227,11 @@ export class SystemMap3D {
       });
     }
 
+    // One ring per moon (Jupiter/Saturn style — never co-orbital display)
     for (const b of moons) {
       const parent = planets.find((p) => p.id === b.parent_id);
       if (!parent) continue;
-      const localR = 0.55 + (b.display_orbit_au || 0.03) * 8;
+      const localR = this._moonLocalR(b);
       const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(0.07, 16, 16),
         new THREE.MeshStandardMaterial({ color: 0xb8c0c8, roughness: 0.85, emissive: 0x000000 })
@@ -238,7 +239,7 @@ export class SystemMap3D {
       mesh.userData = { bodyId: b.id, kind: "moon", parentId: b.parent_id };
       this.root.add(mesh);
       const mring = this._makeRing(localR, 0x2a3545);
-      mring.userData = { moonRingFor: b.parent_id, localR };
+      mring.userData = { moonRingFor: b.parent_id, moonId: b.id, localR };
       this.root.add(mring);
       const label = this._makeLabel(b.name, 0.55);
       this.root.add(label);
@@ -321,10 +322,25 @@ export class SystemMap3D {
       if (entry.kind !== "moon") {
         entry.a_au = b.semi_major_au || entry.a_au;
       } else {
-        entry.localR = 0.55 + (b.display_orbit_au || 0.03) * 8;
+        entry.localR = this._moonLocalR(b);
         entry.parentId = b.parent_id;
+        // keep ring radius in sync
+        this.root.traverse((o) => {
+          if (o.userData?.moonId === id && o.userData.localR != null) {
+            // rebuild not needed — position uses entry.localR; ring scale via userData
+            o.userData.localR = entry.localR;
+          }
+        });
       }
     }
+  }
+
+  /** Map scene radius for a moon — distinct per orbit index / a/R. */
+  _moonLocalR(b) {
+    const idx = b.moon_orbit_index != null ? b.moon_orbit_index : 0;
+    const aR = b.moon_a_over_R || 10;
+    // Inner ~0.55, each step out ~+0.42; also scale gently with a/R
+    return 0.5 + idx * 0.45 + Math.min(0.35, (aR / 60) * 0.4);
   }
 
   _layoutBodies() {

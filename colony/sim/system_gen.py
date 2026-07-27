@@ -368,29 +368,39 @@ class StarSystem:
             p_s = period_seconds(b.semi_major_m, star_mu)
             out.append(self._body_dict(b, x_au, y_au, phase, p_s, star_mu))
 
+        # Group moons by parent for nested display rings (never share a ring)
+        moons_by_parent: Dict[str, List[Body]] = {}
         for b in self.bodies:
-            if b.kind != "moon":
-                continue
-            parent = self.body_by_id(b.parent_id) if b.parent_id else None
+            if b.kind == "moon" and b.parent_id:
+                moons_by_parent.setdefault(b.parent_id, []).append(b)
+        for pid in moons_by_parent:
+            moons_by_parent[pid].sort(key=lambda m: m.semi_major_m)
+
+        for parent_id, siblings in moons_by_parent.items():
+            parent = self.body_by_id(parent_id)
             if not parent:
                 continue
             parent_mu = G * parent.mass_kg
-            phase = body_phase_rad(b.semi_major_m, parent_mu, t_seconds, b.phase0)
-            px, py = true_xy.get(b.parent_id, (0.0, 0.0))
-            # True moon offset in AU is tiny; for map, park moons on a small ring
-            # around the parent in *display* space only — labeled with real period.
-            p_s = period_seconds(b.semi_major_m, parent_mu)
-            # display ring: scale with moon index-ish from SMA, ~3–8% of parent orbital radius visual
-            parent_a = parent.semi_major_m / AU_M
-            disp_r = max(0.015, min(0.045, parent_a * 0.02)) * (0.7 + 0.3 * (b.semi_major_m / (parent.radius_m * 40 + 1)))
-            # Keep moon visually tied to parent true position (pre-sqrt); map applies √ later.
-            x_au = px + disp_r * math.cos(phase)
-            y_au = py + disp_r * math.sin(phase)
-            d = self._body_dict(b, x_au, y_au, phase, p_s, parent_mu)
-            d["orbit_parent"] = b.parent_id
-            d["moon_sma_km"] = round(b.semi_major_m / 1000.0, 0)
-            d["display_orbit_au"] = disp_r
-            out.append(d)
+            px, py = true_xy.get(parent_id, (0.0, 0.0))
+            max_sma = max(m.semi_major_m for m in siblings) or 1.0
+            n_sib = len(siblings)
+            for idx, b in enumerate(siblings):
+                phase = body_phase_rad(b.semi_major_m, parent_mu, t_seconds, b.phase0)
+                p_s = period_seconds(b.semi_major_m, parent_mu)
+                # Distinct display radius: inner moons closer, outer farther (map units)
+                # Rank + physical a/R so Galilean spacing reads clearly when focused.
+                frac = b.semi_major_m / max_sma
+                rank_frac = (idx + 1) / max(n_sib, 1)
+                disp_r = 0.012 + 0.055 * (0.45 * frac + 0.55 * rank_frac)
+                x_au = px + disp_r * math.cos(phase)
+                y_au = py + disp_r * math.sin(phase)
+                d = self._body_dict(b, x_au, y_au, phase, p_s, parent_mu)
+                d["orbit_parent"] = b.parent_id
+                d["moon_sma_km"] = round(b.semi_major_m / 1000.0, 0)
+                d["moon_a_over_R"] = round(b.semi_major_m / parent.radius_m, 2)
+                d["moon_orbit_index"] = idx  # 0 = innermost
+                d["display_orbit_au"] = disp_r
+                out.append(d)
 
         max_au = max((b.semi_major_m / AU_M for b in self.bodies if b.kind in ("planet", "asteroid")), default=5.0)
         return {
@@ -648,6 +658,35 @@ def _make_planet(
     )
 
 
+def _nested_moon_radii_Rp(rng: random.Random, planet: Body, n: int) -> List[float]:
+    """
+    Strictly increasing semi-major axes in units of planetary radii.
+    Modelled on Galilean / major Saturnian moon ladders — never co-orbital.
+    """
+    if n <= 0:
+        return []
+    # Reference ladders (R_planet): Io–Callisto-ish, then outer irregular-ish
+    if planet.planet_class == "gas_giant":
+        template = [5.9, 9.4, 15.0, 26.3, 38.0, 55.0]
+    elif planet.planet_class == "ice_giant":
+        template = [5.0, 8.5, 14.0, 22.0, 33.0]
+    else:
+        # Rocky: rare companions; Earth–Moon ~60 R⊕ is large
+        template = [35.0, 55.0, 80.0]
+
+    mults: List[float] = []
+    prev = 0.0
+    for i in range(n):
+        base = template[i] if i < len(template) else prev * rng.uniform(1.4, 1.65)
+        # Jitter but keep ≥25% separation from previous orbit
+        r = base * rng.uniform(0.94, 1.06)
+        if prev > 0:
+            r = max(r, prev * 1.28)
+        mults.append(r)
+        prev = r
+    return mults
+
+
 def _make_moons(
     rng: random.Random, planet: Body, au: float, snow: float, star_metallicity: float = 1.0
 ) -> List[Body]:
@@ -655,21 +694,20 @@ def _make_moons(
     if planet.planet_class == "gas_giant":
         n = rng.randint(3, 5)
     elif planet.planet_class == "ice_giant":
-        n = rng.randint(1, 3)
+        n = rng.randint(2, 4)
     elif planet.mass_kg > 0.7 * EARTH_MASS:
         n = rng.randint(0, 2)
     else:
         n = 1 if rng.random() < 0.35 else 0
 
-    # Real-ish moon SMAs: 3–40 planetary radii (Earth–Moon ~60 R⊕ is large; Io–Callisto ~6–26 RJup)
-    for m in range(n):
-        if planet.planet_class in ("gas_giant", "ice_giant"):
-            r_mult = rng.uniform(5, 30)
-        else:
-            r_mult = rng.uniform(8, 45)
+    r_mults = _nested_moon_radii_Rp(rng, planet, n)
+    for m, r_mult in enumerate(r_mults):
         sma = r_mult * planet.radius_m
-        # Mass: Luna ~0.012 M⊕; major icy moons smaller
-        m_mass = rng.uniform(1e20, 1.5e23) if planet.planet_class != "rocky" else rng.uniform(1e19, 8e22)
+        # Mass: major icy moons vs small rocky companions
+        if planet.planet_class in ("gas_giant", "ice_giant"):
+            m_mass = rng.uniform(2e21, 1.5e23)  # Europa–Ganymede class scale
+        else:
+            m_mass = rng.uniform(1e19, 8e22)
         m_radius = max(1.5e5, EARTH_RADIUS * (m_mass / EARTH_MASS) ** 0.3 * 0.2)
         moon_ice = au > snow * 0.75 or planet.planet_class != "rocky" or rng.random() < 0.35
         moon_metal = rng.random() < 0.3

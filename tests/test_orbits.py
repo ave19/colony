@@ -57,3 +57,29 @@ def test_generate_system_believable():
         assert m.parent_id and m.parent_id.startswith("p")
         parent = sys.body_by_id(m.parent_id)
         assert parent and parent.kind == "planet"
+
+
+def test_moons_have_distinct_orbits_like_jupiter():
+    """Sibling moons never share semi-major axis (Galilean-style nesting)."""
+    sys = generate_system(seed=99, star_type_id="G2V")
+    by_parent = {}
+    for m in sys.bodies:
+        if m.kind != "moon":
+            continue
+        by_parent.setdefault(m.parent_id, []).append(m)
+    checked = 0
+    for pid, sibs in by_parent.items():
+        if len(sibs) < 2:
+            continue
+        checked += 1
+        smas = sorted(m.semi_major_m for m in sibs)
+        for a, b in zip(smas, smas[1:]):
+            assert b > a * 1.2, f"moons of {pid} too close: {a} vs {b}"
+        parent = sys.body_by_id(pid)
+        # Display radii also distinct
+        d = sys.to_dict(0.0)
+        moon_dicts = [x for x in d["bodies"] if x["kind"] == "moon" and x["parent_id"] == pid]
+        disp = sorted(x["display_orbit_au"] for x in moon_dicts)
+        for a, b in zip(disp, disp[1:]):
+            assert b > a * 1.05, "display rings must not coincide"
+    assert checked >= 1, "need at least one multi-moon planet in test system"
