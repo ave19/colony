@@ -105,12 +105,22 @@ def select_star(body: SelectStarBody):
         raise HTTPException(400, str(e)) from e
 
 
+class WarpBody(BaseModel):
+    force: bool = False  # confirm long jumps (>~1 week)
+
+
 @app.post("/api/warp")
-def warp():
-    result = room().warp_to_next_event()
+def warp(body: WarpBody = WarpBody()):
+    result = room().warp_to_next_event(force=body.force)
     snap = room().snapshot()
     snap["warp"] = result
     return snap
+
+
+@app.get("/api/events")
+def events():
+    room().catch_up()
+    return {"event_queue": room().event_queue(), "next_event": (room().event_queue() or [None])[0]}
 
 
 @app.post("/api/scan")

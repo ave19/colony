@@ -31,7 +31,7 @@ def test_continuous_time_advance_moves_orbit_phase():
     seed = g.catalog[0]["seed"]
     g.select_star(seed)
     while g.phase == "transit":
-        g.warp_to_next_event()
+        g.warp_to_next_event(force=True)
     assert g.phase == "system"
     body = next(b for b in g.system.bodies if b.kind == "planet")
     snap0 = g.system.to_dict(g.sim_time_s)
@@ -52,7 +52,7 @@ def test_arrival_has_ark_only_no_prebuilt_specialists():
     g.open_survey_archive()
     g.select_star(g.catalog[0]["seed"])
     while g.phase == "transit":
-        g.warp_to_next_event()
+        g.warp_to_next_event(force=True)
     kinds = [u.kind for u in g.fleet.values()]
     assert kinds == ["ark"]
     assert g.ark_stock["steel"] > 0
@@ -65,7 +65,7 @@ def test_queue_build_survey_then_order_survey_unlocks_site():
     g.open_survey_archive()
     g.select_star(g.catalog[0]["seed"])
     while g.phase == "transit":
-        g.warp_to_next_event()
+        g.warp_to_next_event(force=True)
     assert not any(u.kind == "survey" for u in g.fleet.values())
 
     steel0 = g.ark_stock["steel"]
@@ -77,7 +77,7 @@ def test_queue_build_survey_then_order_survey_unlocks_site():
     for _ in range(20):
         if any(u.kind == "survey" for u in g.fleet.values()):
             break
-        g.warp_to_next_event()
+        g.warp_to_next_event(force=True)
     surveys = [u for u in g.fleet.values() if u.kind == "survey"]
     assert len(surveys) == 1
     sat = surveys[0]
@@ -105,12 +105,12 @@ def test_directed_search_can_exhaust_missing_resource():
     g.open_survey_archive()
     g.select_star(g.catalog[0]["seed"])
     while g.phase == "transit":
-        g.warp_to_next_event()
+        g.warp_to_next_event(force=True)
     g.queue_build("survey")
     for _ in range(20):
         if any(u.kind == "survey" for u in g.fleet.values()):
             break
-        g.warp_to_next_event()
+        g.warp_to_next_event(force=True)
     sat = next(u for u in g.fleet.values() if u.kind == "survey")
     # Body with no Fe deposit — directed search should conclude none
     body = next(
@@ -128,6 +128,35 @@ def test_directed_search_can_exhaust_missing_resource():
     for _ in range(10):
         g.advance(SECONDS_PER_DAY * 30)
     assert "Fe" in body.seek_exhausted
+
+
+def test_warp_idle_skips_no_time():
+    g = Game(universe_seed=9)
+    g.open_survey_archive()
+    g.select_star(g.catalog[0]["seed"])
+    while g.phase == "transit":
+        g.warp_to_next_event(force=True)
+    # After arrival with only ark idle, warp must not invent a week of progress
+    t0 = g.sim_time_s
+    r = g.warp_to_next_event(force=False)
+    assert r["reason"] == "idle"
+    assert r["warped_months"] == 0
+    # catch_up may add a few wall-clock seconds; must not skip days/months
+    assert abs(g.sim_time_s - t0) < 60
+
+
+def test_warp_long_jump_needs_confirm():
+    g = Game(universe_seed=9)
+    g.open_survey_archive()
+    g.select_star(g.catalog[0]["seed"])
+    assert g.phase == "transit"
+    assert g.transit_months_left > 1.0
+    r = g.warp_to_next_event(force=False)
+    assert r.get("needs_confirm") is True
+    assert r["warped_months"] == 0
+    assert g.phase == "transit"
+    r2 = g.warp_to_next_event(force=True)
+    assert r2["warped_months"] > 0
 
 
 def test_cannot_commit_unknown_seed():

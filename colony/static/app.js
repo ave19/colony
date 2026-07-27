@@ -96,6 +96,7 @@ function render() {
     $("clock").textContent = `${state.sim_years.toFixed(2)} y`;
   }
   $("toast").textContent = state.message || "";
+  renderNextEvent();
 
   $("panel-menu").hidden = state.phase !== "menu";
   $("panel-transit").hidden = state.phase !== "transit";
@@ -585,9 +586,67 @@ $("btn-catalog").onclick = async () => {
   $("panel-left").classList.remove("collapsed");
   render();
 };
+function renderNextEvent() {
+  const el = $("next-event");
+  if (!el || !state) return;
+  const n = state.next_event;
+  if (!n) {
+    el.textContent = "No event queued";
+    el.title = "Warp will not skip time while nothing is scheduled";
+    return;
+  }
+  const when =
+    n.years >= 0.5
+      ? `~${n.years.toFixed(2)} y`
+      : n.months >= 1
+        ? `~${n.months.toFixed(1)} mo`
+        : `~${(n.months * 30).toFixed(0)} d`;
+  el.textContent = `Next: ${n.label} (${when})`;
+  el.title = n.needs_confirm
+    ? "Long jump — Warp will ask before skipping this far"
+    : "Warp skips to this event";
+}
+
 $("btn-warp").onclick = async () => {
-  state = await api("/api/warp", { method: "POST", body: "{}" });
-  render();
+  try {
+    let res = await api("/api/warp", {
+      method: "POST",
+      body: JSON.stringify({ force: false }),
+    });
+    const w = res.warp || {};
+    if (w.needs_confirm) {
+      const n = w.next_event || {};
+      const when =
+        n.years >= 0.5
+          ? `${n.years.toFixed(2)} years`
+          : `${(n.months || 0).toFixed(2)} months`;
+      const ok = confirm(
+        `${w.message || "Confirm time skip"}\n\n` +
+          `Skip ${when} to:\n${n.label || "next event"}?\n\n` +
+          `Cancel if you were only looking for a button — no time will be lost.`
+      );
+      if (!ok) {
+        $("toast").textContent = "Warp cancelled — no time skipped.";
+        return;
+      }
+      res = await api("/api/warp", {
+        method: "POST",
+        body: JSON.stringify({ force: true }),
+      });
+    } else if (w.reason === "idle") {
+      $("toast").textContent = w.message || "Nothing queued — no time skipped.";
+      state = res;
+      render();
+      return;
+    }
+    state = res;
+    if (res.warp && res.warp.message) {
+      state.message = res.warp.message;
+    }
+    render();
+  } catch (e) {
+    alert(String(e.message || e).slice(0, 280));
+  }
 };
 $("btn-warp-transit").onclick = () => $("btn-warp").click();
 $("btn-reset").onclick = async () => {

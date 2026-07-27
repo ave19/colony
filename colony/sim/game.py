@@ -340,36 +340,113 @@ class Game:
         )
         return self.snapshot()
 
-    def warp_to_next_event(self) -> dict:
-        """Advance to next meaningful event (orders, builds, survey slice)."""
-        self.catch_up()
-        targets: List[float] = []
+    # Safe warp without confirm: about one week. Longer jumps need force=True.
+    SAFE_WARP_MONTHS = 7.0 / DAYS_PER_MONTH
+    # Survey discovery slices (not a full month per click)
+    SURVEY_WARP_SLICE_MONTHS = 7.0 / DAYS_PER_MONTH
+
+    def event_queue(self) -> List[dict]:
+        """Upcoming scheduled work, shortest first — the event queue."""
+        items: List[dict] = []
         if self.phase == "transit" and self.transit_months_left > 0:
-            targets.append(self.transit_months_left)
+            items.append(
+                {
+                    "kind": "transit",
+                    "label": "Arrive in system (end of transit)",
+                    "months": self.transit_months_left,
+                }
+            )
         for h in self.hauls.values():
             if h.status == "in_flight" and h.months_left > 0:
-                targets.append(h.months_left)
+                items.append(
+                    {
+                        "kind": "haul",
+                        "label": f"Haul arrives: {h.amount_t:.0f} t {h.resource}",
+                        "months": h.months_left,
+                    }
+                )
         for job in self.build_queue:
             if job.status == "building" and job.months_left > 0:
-                targets.append(job.months_left)
+                items.append(
+                    {
+                        "kind": "build",
+                        "label": f"Finish building {job.name}",
+                        "months": job.months_left,
+                    }
+                )
         for u in self.fleet.values():
             if u.status == "en_route" and u.months_left > 0:
-                targets.append(u.months_left)
+                goal = u.search_resource or u.order or "destination"
+                items.append(
+                    {
+                        "kind": "en_route",
+                        "label": f"{u.name} arrives ({goal})",
+                        "months": u.months_left,
+                    }
+                )
             elif u.status == "working" and u.order == "mine" and u.months_left > 0:
-                targets.append(u.months_left)
+                items.append(
+                    {
+                        "kind": "mine",
+                        "label": f"{u.name} finishes mining shift",
+                        "months": u.months_left,
+                    }
+                )
             elif u.status == "working" and u.order == "survey":
-                # Warp survey in 1-month slices so discoveries surface gradually
-                targets.append(1.0)
-        if not targets:
-            # Small nudge: 1 week of game time (world still advances)
-            self.advance(SECONDS_PER_DAY * 7)
-            self._log("event", "No pending orders — advanced 1 week.")
-            return {"warped_months": 7.0 / DAYS_PER_MONTH, "reason": "idle_nudge"}
-        m = min(targets)
+                res = u.search_resource or "broad survey"
+                items.append(
+                    {
+                        "kind": "survey",
+                        "label": f"{u.name} survey progress ({res})",
+                        "months": self.SURVEY_WARP_SLICE_MONTHS,
+                    }
+                )
+        items.sort(key=lambda x: x["months"])
+        for it in items:
+            it["months"] = round(it["months"], 3)
+            it["years"] = round(it["months"] / 12.0, 3)
+            it["needs_confirm"] = it["months"] > self.SAFE_WARP_MONTHS + 1e-9
+        return items
+
+    def warp_to_next_event(self, force: bool = False) -> dict:
+        """
+        Advance to next queue event.
+        Jumps longer than ~1 week require force=True (UI confirms) so
+        hunting for a button does not burn months/years by accident.
+        Idle warp skips *no* time.
+        """
+        self.catch_up()
+        queue = self.event_queue()
+        if not queue:
+            return {
+                "warped_months": 0.0,
+                "reason": "idle",
+                "message": "Nothing queued — no time skipped.",
+                "next_event": None,
+            }
+        nxt = queue[0]
+        m = float(nxt["months"])
+        if m > self.SAFE_WARP_MONTHS and not force:
+            return {
+                "warped_months": 0.0,
+                "reason": "needs_confirm",
+                "needs_confirm": True,
+                "next_event": nxt,
+                "message": (
+                    f"Next: {nxt['label']} in {m:.2f} mo (~{m/12:.2f} y). "
+                    f"Confirm to skip that far — time will not advance until you do."
+                ),
+            }
         self.advance(m * SECONDS_PER_DAY * DAYS_PER_MONTH)
         self.auto_warp_votes += 1
-        self._log("event", f"Warped {m:.2f} months to next order/event.")
-        return {"warped_months": m, "reason": "next_event"}
+        self._log("event", f"Warped {m:.2f} mo → {nxt['label']}")
+        return {
+            "warped_months": m,
+            "reason": "next_event",
+            "needs_confirm": False,
+            "next_event": nxt,
+            "message": f"Advanced {m:.2f} mo to: {nxt['label']}",
+        }
 
     def _log(self, kind: str, text: str) -> None:
         self.events.insert(
@@ -1065,6 +1142,8 @@ class Game:
             "tech": tech_book_summary(),
             "unit_builds": UNIT_BUILDS,
             "transit_months_left": round(self.transit_months_left, 2),
+            "event_queue": self.event_queue()[:8],
+            "next_event": (self.event_queue() or [None])[0],
             "build_options": {
                 "power": {k: {"name": v["name"], "description": v["description"]} for k, v in POWER_OPTIONS.items()},
                 "hab": {k: {"name": v["name"], "description": v["description"]} for k, v in HAB_OPTIONS.items()},

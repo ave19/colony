@@ -70,6 +70,13 @@ html, body {
   border-radius: 999px;
   padding: 3px 10px;
 }
+.pill.next-event {
+  max-width: min(420px, 40vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #c5d8ea;
+}
 
 .hud-hint {
   position: absolute;
