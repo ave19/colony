@@ -121,12 +121,14 @@ def ark_scan_goal(body: ArkScanGoalBody):
 
 
 class WarpBody(BaseModel):
-    force: bool = False  # confirm long jumps (>~1 week)
+    force: bool = False  # confirm long jumps
 
 
 @app.post("/api/warp")
-def warp(body: WarpBody = WarpBody()):
-    result = room().warp_to_next_event(force=body.force)
+def warp(body: Optional[WarpBody] = None):
+    """Advance sim to next event. Pass {\"force\": true} after UI confirms long jumps."""
+    force = bool(body.force) if body is not None else False
+    result = room().warp_to_next_event(force=force)
     snap = room().snapshot()
     snap["warp"] = result
     return snap

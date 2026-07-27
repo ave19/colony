@@ -868,10 +868,11 @@ class Game:
         )
         return self.snapshot()
 
-    # Safe warp without confirm: about one week. Longer jumps need force=True.
-    SAFE_WARP_MONTHS = 7.0 / DAYS_PER_MONTH
-    # Survey discovery slices (not a full month per click)
-    SURVEY_WARP_SLICE_MONTHS = 7.0 / DAYS_PER_MONTH
+    # Auto-warp without confirm for short logistics (fab jobs, local hops).
+    # Multi-month / multi-year jumps (transit, outer system) need force=True.
+    SAFE_WARP_MONTHS = 3.0  # ~3 months
+    # Survey discovery slices — short checkpoints so warp feels responsive
+    SURVEY_WARP_SLICE_MONTHS = 0.5  # half a month per survey/ark-scan warp
 
     def event_queue(self) -> List[dict]:
         """Upcoming scheduled work, shortest first — the event queue."""
@@ -991,9 +992,8 @@ class Game:
     def warp_to_next_event(self, force: bool = False) -> dict:
         """
         Advance to next queue event.
-        Jumps longer than ~1 week require force=True (UI confirms) so
-        hunting for a button does not burn months/years by accident.
-        Idle warp skips *no* time.
+        Jumps longer than SAFE_WARP_MONTHS require force=True (UI confirms) so
+        multi-year transit is not one accidental click. Idle warp skips *no* time.
         """
         self.catch_up()
         queue = self.event_queue()
@@ -1001,11 +1001,21 @@ class Game:
             return {
                 "warped_months": 0.0,
                 "reason": "idle",
-                "message": "Nothing queued — no time skipped.",
+                "message": "Nothing queued — authorize a build, order a unit, or set a scan goal first.",
                 "next_event": None,
             }
         nxt = queue[0]
         m = float(nxt["months"])
+        # Never "warp" a zero/negative residual (float dust)
+        if m <= 1e-9:
+            self.advance(SECONDS_PER_DAY * 0.01)
+            return {
+                "warped_months": 0.0,
+                "reason": "next_event",
+                "needs_confirm": False,
+                "next_event": nxt,
+                "message": f"Event due: {nxt['label']}",
+            }
         if m > self.SAFE_WARP_MONTHS and not force:
             return {
                 "warped_months": 0.0,
@@ -1014,18 +1024,21 @@ class Game:
                 "next_event": nxt,
                 "message": (
                     f"Next: {nxt['label']} in {m:.2f} mo (~{m/12:.2f} y). "
-                    f"Confirm to skip that far — time will not advance until you do."
+                    f"Confirm long warp — time will not advance until you do."
                 ),
             }
-        self.advance(m * SECONDS_PER_DAY * DAYS_PER_MONTH)
+        # Nudge slightly past the event so floating-point cannot leave units stuck
+        # at months_left ≈ 1e-15 still "en_route".
+        dt_months = m + 1e-6
+        self.advance(dt_months * SECONDS_PER_DAY * DAYS_PER_MONTH)
         self.auto_warp_votes += 1
         self._log("event", f"Warped {m:.2f} mo → {nxt['label']}")
         return {
-            "warped_months": m,
+            "warped_months": round(m, 4),
             "reason": "next_event",
             "needs_confirm": False,
             "next_event": nxt,
-            "message": f"Advanced {m:.2f} mo to: {nxt['label']}",
+            "message": f"Warped {m:.2f} mo → {nxt['label']}",
         }
 
     def _log(self, kind: str, text: str) -> None:

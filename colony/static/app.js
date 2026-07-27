@@ -2026,48 +2026,65 @@ function renderNextEvent() {
     : "Warp skips to this event";
 }
 
+async function doWarp({ force = false } = {}) {
+  const res = await api("/api/warp", {
+    method: "POST",
+    body: JSON.stringify({ force: !!force }),
+  });
+  return res;
+}
+
 $("btn-warp").onclick = async () => {
+  const btn = $("btn-warp");
+  if (btn) btn.disabled = true;
   try {
-    let res = await api("/api/warp", {
-      method: "POST",
-      body: JSON.stringify({ force: false }),
-    });
-    const w = res.warp || {};
+    let res = await doWarp({ force: false });
+    let w = res.warp || {};
+
     if (w.needs_confirm) {
       const n = w.next_event || {};
       const when =
         n.years >= 0.5
           ? `${n.years.toFixed(2)} years`
-          : `${(n.months || 0).toFixed(2)} months`;
-      const ok = confirm(
-        `${w.message || "Confirm time skip"}\n\n` +
-          `Skip ${when} to:\n${n.label || "next event"}?\n\n` +
-          `Cancel if you were only looking for a button — no time will be lost.`
+          : n.months >= 1
+            ? `${(n.months || 0).toFixed(2)} months`
+            : `${Math.round((n.months || 0) * 30)} days`;
+      const ok = window.confirm(
+        `Long warp confirmation\n\n` +
+          `${w.message || "Skip ahead?"}\n\n` +
+          `Jump ${when} to:\n“${n.label || "next event"}”\n\n` +
+          `OK = advance time · Cancel = stay (no time lost)`
       );
       if (!ok) {
         $("toast").textContent = "Warp cancelled — no time skipped.";
+        state = res;
+        renderNextEvent();
         return;
       }
-      res = await api("/api/warp", {
-        method: "POST",
-        body: JSON.stringify({ force: true }),
-      });
-    } else if (w.reason === "idle") {
-      $("toast").textContent = w.message || "Nothing queued — no time skipped.";
-      state = res;
-      render();
-      return;
+      res = await doWarp({ force: true });
+      w = res.warp || {};
     }
+
     state = res;
-    if (res.warp && res.warp.message) {
-      state.message = res.warp.message;
+    if (w.message) state.message = w.message;
+    if (w.reason === "idle") {
+      $("toast").textContent =
+        w.message || "Nothing queued — no time skipped.";
+    } else if (w.warped_months > 0 || w.reason === "next_event") {
+      $("toast").textContent = w.message || "Warped.";
     }
     render();
   } catch (e) {
-    alert(String(e.message || e).slice(0, 280));
+    console.error("warp failed", e);
+    $("toast").textContent = "Warp failed: " + String(e.message || e).slice(0, 200);
+    alert("Warp failed: " + String(e.message || e).slice(0, 280));
+  } finally {
+    if (btn) btn.disabled = false;
   }
 };
-$("btn-warp-transit").onclick = () => $("btn-warp").click();
+if ($("btn-warp-transit")) {
+  $("btn-warp-transit").onclick = () => $("btn-warp") && $("btn-warp").click();
+}
 $("btn-reset").onclick = async () => {
   if (!confirm("Reset?")) return;
   state = await api("/api/reset", { method: "POST", body: "{}" });

@@ -263,6 +263,22 @@ def test_warp_long_jump_needs_confirm():
     assert r2["warped_months"] > 0
 
 
+def test_warp_short_fab_does_not_need_confirm():
+    """Typical bay jobs (~1.5–3 mo) should warp in one click."""
+    g = Game(universe_seed=9)
+    g.open_survey_archive()
+    g.select_star(g.catalog[0]["seed"])
+    while g.phase == "transit":
+        g.warp_to_next_event(force=True)
+    g.queue_build("survey")
+    assert g.build_queue
+    assert g.build_queue[0].months_left <= 3.0
+    r = g.warp_to_next_event(force=False)
+    assert r.get("needs_confirm") is not True
+    assert r["warped_months"] > 0
+    assert any(u.kind == "survey" for u in g.fleet.values())
+
+
 def test_cannot_commit_unknown_seed():
     g = Game(universe_seed=5)
     g.open_survey_archive()
