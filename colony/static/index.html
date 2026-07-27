@@ -5,100 +5,108 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Colony</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.1/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.1/examples/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
   <div id="app">
-    <header>
-      <h1><span>COLONY</span></h1>
-      <div class="hdr-meta">
-        <span id="phase" class="pill">—</span>
-        <span id="clock" class="pill">—</span>
-        <span id="pop" class="pill">—</span>
-        <button type="button" id="btn-warp" class="primary">Warp → next order</button>
-        <button type="button" id="btn-reset" title="New game">Reset</button>
+    <!-- Map dominates everything -->
+    <div id="viewport">
+      <canvas id="map3d"></canvas>
+      <div class="hud-top">
+        <div class="brand"><span>COLONY</span></div>
+        <div class="hud-meta">
+          <span id="phase" class="pill">—</span>
+          <span id="clock" class="pill">—</span>
+          <span id="pop" class="pill">—</span>
+        </div>
+        <div class="hud-actions">
+          <button type="button" id="btn-focus-system" title="Zoom out to whole system">System view</button>
+          <button type="button" id="btn-focus-sel" title="Zoom to selected body">Focus selected</button>
+          <button type="button" id="btn-warp" class="primary">Warp</button>
+          <button type="button" id="btn-reset">Reset</button>
+        </div>
       </div>
-    </header>
-
-    <!-- Fleet outliner -->
-    <aside class="left">
-      <div id="panel-menu">
-        <h2>Choose a star</h2>
-        <p class="muted">You are a colony ship. Commit to a system — distances are real; gas giants take ~a decade per orbit.</p>
-        <button type="button" id="btn-catalog" class="primary">Survey nearby stars</button>
-        <div id="catalog"></div>
+      <div class="hud-hint" id="map-hint">
+        Drag to orbit · Scroll to zoom · Click body to select · Double-click to focus
       </div>
+      <div class="toast" id="toast">Loading…</div>
+    </div>
 
-      <div id="panel-transit" hidden>
-        <h2>In transit</h2>
-        <p class="muted" id="transit-msg"></p>
-        <button type="button" id="btn-warp-transit" class="primary">Warp to arrival</button>
-      </div>
-
-      <div id="panel-system" hidden>
-        <h2>Fleet</h2>
-        <p class="muted tip">Select a unit, then a body on the map, then an order.</p>
-        <div id="fleet-list"></div>
-
-        <h2>Selected unit</h2>
-        <div id="unit-panel" class="empty">Select a fleet unit</div>
+    <!-- Floating panels (do not steal the map) -->
+    <aside id="panel-left" class="float-panel left collapsed">
+      <button type="button" class="panel-toggle" id="toggle-left" title="Toggle panel">☰</button>
+      <div class="panel-body">
+        <div id="panel-menu">
+          <h2>Star surveys</h2>
+          <p class="muted">Existing dossiers from the going concern — not instant magic scans.</p>
+          <button type="button" id="btn-catalog" class="primary">Open survey archive</button>
+          <div id="catalog"></div>
+        </div>
+        <div id="panel-transit" hidden>
+          <h2>In transit</h2>
+          <p class="muted" id="transit-msg"></p>
+          <button type="button" id="btn-warp-transit" class="primary">Warp to arrival</button>
+        </div>
+        <div id="panel-system" hidden>
+          <h2>Fleet</h2>
+          <div id="fleet-list"></div>
+          <h2>Selected unit</h2>
+          <div id="unit-panel" class="empty">Select a unit</div>
+        </div>
       </div>
     </aside>
 
-    <!-- Map -->
-    <section class="main">
-      <canvas id="map"></canvas>
-      <div class="toast" id="toast">Loading…</div>
-      <div class="map-legend" id="map-legend"></div>
-    </section>
-
-    <!-- Target + build choices -->
-    <aside class="right">
-      <div id="right-menu" class="muted">Survey stars to begin.</div>
-      <div id="right-system" hidden>
-        <h2>Target body</h2>
-        <div id="body-panel" class="empty">Click a planet, moon, or belt object</div>
-
-        <div id="orders-panel" hidden>
-          <h2>Orders</h2>
-          <div id="orders" class="choice-grid"></div>
-        </div>
-
-        <div id="build-panel" hidden>
-          <h2>What do you want to build?</h2>
-          <p class="muted">Applies at the target. Spawns project needs — logistics follows.</p>
-          <div class="card">
-            <label>Power
-              <select id="power-id">
-                <option value="solar">Solar</option>
-                <option value="chemical">Chemical genset</option>
-                <option value="fusion">Fusion (long path)</option>
-              </select>
-            </label>
-            <label>Habitation
-              <select id="hab-id">
-                <option value="underground">Underground habitat</option>
-                <option value="surface">Surface habitat</option>
-              </select>
-            </label>
-            <p class="muted" id="build-hint"></p>
-            <button type="button" id="btn-plan" class="primary">Found project here</button>
+    <aside id="panel-right" class="float-panel right collapsed">
+      <button type="button" class="panel-toggle" id="toggle-right" title="Toggle panel">☰</button>
+      <div class="panel-body">
+        <div id="right-menu" class="muted">Open the survey archive to begin.</div>
+        <div id="right-system" hidden>
+          <h2>Selected body</h2>
+          <div id="body-panel" class="empty">Click a body in the map</div>
+          <div id="orders-panel" hidden>
+            <h2>Orders</h2>
+            <div id="orders" class="choice-grid"></div>
           </div>
+          <div id="build-panel" hidden>
+            <h2>Build here</h2>
+            <div class="card">
+              <label>Power
+                <select id="power-id">
+                  <option value="solar">Solar</option>
+                  <option value="chemical">Chemical</option>
+                  <option value="fusion">Fusion (long path)</option>
+                </select>
+              </label>
+              <label>Habitation
+                <select id="hab-id">
+                  <option value="underground">Underground</option>
+                  <option value="surface">Surface</option>
+                </select>
+              </label>
+              <p class="muted" id="build-hint"></p>
+              <button type="button" id="btn-plan" class="primary">Found project</button>
+            </div>
+          </div>
+          <h2>Projects</h2>
+          <div id="projects"></div>
+          <h2>Needs</h2>
+          <div id="contracts"></div>
+          <details class="drawer">
+            <summary>Cargo &amp; log</summary>
+            <div id="ark-stock" class="stock"></div>
+            <div id="events"></div>
+          </details>
         </div>
-
-        <h2>Active projects</h2>
-        <div id="projects"></div>
-
-        <h2>Open needs</h2>
-        <div id="contracts"></div>
-
-        <details class="drawer">
-          <summary>Ark cargo &amp; events</summary>
-          <div id="ark-stock" class="stock"></div>
-          <div id="events"></div>
-        </details>
       </div>
     </aside>
   </div>
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>

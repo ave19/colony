@@ -1,8 +1,10 @@
-/* Colony — map-first, fleet orders: you → go there → do that */
+/* Colony UI — map-dominant Three.js view + floating panels */
+import { SystemMap3D } from "/static/map3d.js";
 
 let state = null;
 let selectedUnitId = null;
 let selectedBodyId = null;
+let map = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -15,17 +17,28 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
-async function refresh() {
-  state = await api("/api/state");
-  render();
-}
-
 function bodyById(id) {
   return (state?.system?.bodies || []).find((b) => b.id === id);
 }
-
 function unitById(id) {
   return (state?.fleet || []).find((u) => u.id === id);
+}
+
+function initMap() {
+  const canvas = $("map3d");
+  map = new SystemMap3D(canvas);
+  map.onSelect = (id) => {
+    selectedBodyId = id;
+    $("panel-right").classList.remove("collapsed");
+    renderBodyPanel();
+    renderOrders();
+    renderBuild();
+  };
+}
+
+async function refresh() {
+  state = await api("/api/state");
+  render();
 }
 
 function render() {
@@ -35,7 +48,7 @@ function render() {
   if (state.phase === "transit") {
     $("clock").textContent = `${(state.transit_months_left / 12).toFixed(1)} y transit`;
   } else {
-    $("clock").textContent = `${state.sim_years.toFixed(2)} y in-system`;
+    $("clock").textContent = `${state.sim_years.toFixed(2)} y`;
   }
   $("toast").textContent = state.message || "";
 
@@ -45,9 +58,32 @@ function render() {
   $("right-menu").hidden = state.phase === "system";
   $("right-system").hidden = state.phase !== "system";
 
+  if (state.phase === "menu") {
+    $("panel-left").classList.remove("collapsed");
+  }
+
   if (state.phase === "transit") {
     $("transit-msg").textContent =
-      `Coasting ${(state.transit_months_left / 12).toFixed(1)} years. Capture will spend remaining Xe.`;
+      `Coasting ${(state.transit_months_left / 12).toFixed(1)} years.`;
+  }
+
+  // 3D map
+  if (state.phase === "system" && state.system) {
+    if (!map.systemData || map.systemData.seed !== state.system.seed) {
+      map.setSystem(state.system);
+      map.focusSystem();
+    } else {
+      map.updatePositions(state.system);
+    }
+    if (selectedBodyId) map.setSelected(selectedBodyId);
+    $("map-hint").textContent =
+      "Drag orbit · Scroll zoom · Click select · Double-click focus planet (see moons)";
+  } else if (state.phase !== "system") {
+    map.clearSystem();
+    $("map-hint").textContent =
+      state.phase === "menu"
+        ? "Open survey archive (left) — map fills once you arrive in-system"
+        : "In transit — warp to arrival to enter the system map";
   }
 
   renderCatalog();
@@ -60,29 +96,25 @@ function render() {
   renderContracts();
   renderStock();
   renderEvents();
-  renderLegend();
-  drawMap();
 }
 
 function renderCatalog() {
   const el = $("catalog");
   if (!el) return;
   if (!state.catalog?.length) {
-    el.innerHTML = '<p class="empty">No survey yet.</p>';
+    el.innerHTML = '<p class="empty">No archive open.</p>';
     return;
   }
   el.innerHTML = state.catalog
     .map((c) => {
-      const g = c.gas_giant_period_years != null
-        ? ` · gas giant ~${c.gas_giant_period_years} y`
-        : "";
       const title = c.star.designation || c.star.name;
+      const g =
+        c.gas_giant_period_years != null ? ` · gas giant ~${c.gas_giant_period_years} y` : "";
       return `<div class="card">
         <h3>${title}</h3>
         <p>${c.survey_summary}</p>
-        <p>Outer ~${c.outer_au ?? "?"} AU${g} · difficulty ${c.difficulty}/10</p>
-        <p class="muted">Worlds named ${c.star.name}-1, ${c.star.name}-2, …</p>
-        <button class="primary" data-seed="${c.seed}">Commit — go there</button>
+        <p>Outer ~${c.outer_au ?? "?"} AU${g}</p>
+        <button class="primary" data-seed="${c.seed}">Commit transit</button>
       </div>`;
     })
     .join("");
@@ -92,7 +124,7 @@ function renderCatalog() {
         method: "POST",
         body: JSON.stringify({ seed: Number(btn.dataset.seed) }),
       });
-      selectedUnitId = "ark";
+      selectedUnitId = null;
       selectedBodyId = null;
       render();
     };
@@ -103,28 +135,23 @@ function renderFleet() {
   const el = $("fleet-list");
   if (!el || state.phase !== "system") return;
   const fleet = state.fleet || [];
-  if (!fleet.length) {
-    el.innerHTML = '<p class="empty">No fleet (arrive first).</p>';
-    return;
-  }
   el.innerHTML = fleet
     .map((u) => {
       const loc = bodyById(u.location_id);
-      const locName = loc ? loc.name : u.location_id;
       const busy =
         u.status !== "idle"
-          ? `<div class="meta busy">${u.status}: ${u.order || ""} → ${u.target_id || ""} (${u.months_left} mo)</div>`
-          : `<div class="meta">@ ${locName}</div>`;
+          ? `<div class="meta busy">${u.status} ${u.order || ""} ${u.months_left ? u.months_left + " mo" : ""}</div>`
+          : `<div class="meta">@ ${loc ? loc.name : u.location_id}</div>`;
       return `<button type="button" class="fleet-item ${selectedUnitId === u.id ? "selected" : ""}" data-unit="${u.id}">
         <div class="name">${u.name}</div>
-        <div class="meta">${u.kind} · ${(u.capabilities || []).join(", ")}</div>
-        ${busy}
+        <div class="meta">${u.kind}</div>${busy}
       </button>`;
     })
-    .join("");
+    .join("") || '<p class="empty">No fleet</p>';
   el.querySelectorAll("[data-unit]").forEach((btn) => {
     btn.onclick = () => {
       selectedUnitId = btn.dataset.unit;
+      $("panel-left").classList.remove("collapsed");
       render();
     };
   });
@@ -136,17 +163,15 @@ function renderUnitPanel() {
   const u = unitById(selectedUnitId);
   if (!u) {
     el.className = "empty";
-    el.textContent = "Select a fleet unit";
+    el.textContent = "Select a unit";
     return;
   }
   const loc = bodyById(u.location_id);
   el.className = "card";
-  el.innerHTML = `
-    <h3>${u.name}</h3>
-    <p>${u.kind} · can ${ (u.capabilities || []).join(", ") }</p>
-    <p>Location: <strong>${loc ? loc.name : u.location_id}</strong></p>
-    <p>Status: ${u.status}${u.order ? ` (${u.order})` : ""}</p>
-  `;
+  el.innerHTML = `<h3>${u.name}</h3>
+    <p>${u.kind} · ${(u.capabilities || []).join(", ")}</p>
+    <p>@ ${loc ? loc.name : u.location_id}</p>
+    <p>${u.status}${u.order ? " / " + u.order : ""}</p>`;
 }
 
 function renderBodyPanel() {
@@ -155,72 +180,52 @@ function renderBodyPanel() {
   const b = bodyById(selectedBodyId);
   if (!b) {
     el.className = "empty";
-    el.textContent = "Click a body on the map — that's your “there”";
+    el.textContent = "Click a body in the 3D map";
     return;
   }
   el.className = "card";
-  const deps = (b.deposits || [])
-    .map((d) =>
-      d.known ? `${d.resource} g${d.grade} (${Math.round(d.amount_t)}t)` : "unsurveyed"
-    )
-    .join(" · ");
-
-  // Facts card — orbital period, AU, mass, Δv (not on the map label)
-  let facts = "";
-  if (b.kind === "moon") {
-    const parent = bodyById(b.parent_id);
-    facts = `
-      <p><strong>Orbit</strong> moon of ${parent ? parent.name : b.parent_id}</p>
-      <p><strong>Period</strong> ${b.period_label || "—"} (around parent)</p>
-      <p><strong>SMA</strong> ${b.moon_sma_km != null ? Math.round(b.moon_sma_km).toLocaleString() + " km" : "—"}</p>
-      <p><strong>Mass</strong> ${b.mass_earth != null ? b.mass_earth + " M⊕" : "—"} · g ≈ ${b.surface_g}</p>
-    `;
-  } else {
-    facts = `
-      <p><strong>Semi-major axis</strong> ${b.semi_major_au != null ? b.semi_major_au + " AU" : "—"}</p>
-      <p><strong>Orbital period</strong> ${b.period_label || "—"} around the star</p>
-      <p><strong>Mass</strong> ${b.mass_earth != null ? b.mass_earth + " M⊕" : "—"} · radius ${b.radius_earth != null ? b.radius_earth + " R⊕" : "—"} · g ≈ ${b.surface_g}</p>
-    `;
-  }
-
   const sm = b.survey_months || 0;
-  const surveyLine = `<p><strong>Survey time</strong> ${sm.toFixed(1)} mo on station — longer → finer detail → mine sites</p>`;
-
   const depLines = (b.deposits || [])
     .map((d) => {
       if (d.detail <= 0) return null;
-      if (d.detail === 1) return `· ${d.resource_hint || "anomaly"} <span class="badge">${d.hint}</span>`;
-      let s = `· <strong>${d.resource}</strong> <span class="badge">${d.hint}</span>`;
-      if (d.grade != null) s += ` grade ${d.grade}`;
-      if (d.amount_t != null) s += ` ~${Math.round(d.amount_t)} t`;
+      if (d.detail === 1) return `· ${d.resource_hint || "anomaly"} (${d.hint})`;
+      let s = `· ${d.resource} (${d.hint})`;
+      if (d.grade != null) s += ` g${d.grade}`;
+      if (d.amount_t != null) s += ` ~${Math.round(d.amount_t)}t`;
       return s;
     })
     .filter(Boolean)
     .join("<br/>");
+  const sites = (b.mine_sites || [])
+    .map((s) => `· ${s.name} — ${s.resource}`)
+    .join("<br/>");
 
-  const sites = b.mine_sites || [];
-  const siteLines = sites.length
-    ? sites
-        .map(
-          (s) =>
-            `· <strong>${s.name}</strong> (${s.region}) — ${s.resource} g${s.grade}, ~${Math.round(s.amount_t)} t <span class="badge filled">mineable</span>`
-        )
-        .join("<br/>")
-    : `<span class="muted">None yet — keep surveying. You cannot place a mine until a site is found.</span>`;
+  let orbitFact = "";
+  if (b.kind === "moon") {
+    const p = bodyById(b.parent_id);
+    orbitFact = `<p><strong>Orbit</strong> moon of ${p ? p.name : b.parent_id}</p>
+      <p><strong>Period</strong> ${b.period_label || "—"}</p>`;
+  } else {
+    orbitFact = `<p><strong>a</strong> ${b.semi_major_au ?? "—"} AU</p>
+      <p><strong>Period</strong> ${b.period_label || "—"}</p>
+      <p><strong>Mass</strong> ${b.mass_earth ?? "—"} M⊕</p>`;
+  }
 
   el.innerHTML = `
     <h3>${b.name}</h3>
     <p class="muted">${b.kind}${b.planet_class ? " / " + b.planet_class : ""} · ${b.density_hint || ""}</p>
-    <h2 style="margin-top:10px">Facts</h2>
-    ${facts}
-    <p><strong>Δv</strong> surface→orbit ${b.dv_to_orbit_m_s} m/s · orbit→escape ${b.dv_escape_from_orbit_m_s} m/s</p>
-    <p><strong>Atmosphere</strong> ${b.atmosphere_note || "none noted"}</p>
-    ${surveyLine}
-    <h2>Survey intel</h2>
-    <p>${depLines || '<span class="muted">No composition intel yet.</span>'}</p>
+    <button type="button" id="btn-focus-body" class="primary" style="width:100%;margin:6px 0">Focus in map</button>
+    <h2>Facts</h2>
+    ${orbitFact}
+    <p><strong>Δv</strong> ↑orbit ${b.dv_to_orbit_m_s} · esc ${b.dv_escape_from_orbit_m_s} m/s</p>
+    <p><strong>Survey</strong> ${sm.toFixed(1)} mo on station</p>
+    <h2>Intel</h2>
+    <p>${depLines || '<span class="muted">No composition intel yet</span>'}</p>
     <h2>Mine sites</h2>
-    <p>${siteLines}</p>
+    <p>${sites || '<span class="muted">None — keep surveying</span>'}</p>
   `;
+  const fb = $("btn-focus-body");
+  if (fb) fb.onclick = () => map.focusBody(b.id);
 }
 
 async function renderOrders() {
@@ -239,92 +244,76 @@ async function renderOrders() {
     (u.status === "en_route" && u.months_left > 0) ||
     (u.status === "working" && u.order === "mine") ||
     (u.status === "working" && u.order === "survey");
+  const sites = b.mine_sites || [];
+  const surveyingHere = u.status === "working" && u.order === "survey" && u.location_id === b.id;
 
-  const est = async (order, target) => {
-    try {
-      return await api("/api/estimate_order", {
-        method: "POST",
-        body: JSON.stringify({ unit_id: u.id, order, target_id: target || b.id }),
-      });
-    } catch {
-      return null;
-    }
-  };
-
-  const [eMove, eSurvey] = await Promise.all([est("move"), est("survey")]);
+  let estMove = null;
+  let estSurvey = null;
+  try {
+    estMove = await api("/api/estimate_order", {
+      method: "POST",
+      body: JSON.stringify({ unit_id: u.id, order: "move", target_id: b.id }),
+    });
+    estSurvey = await api("/api/estimate_order", {
+      method: "POST",
+      body: JSON.stringify({ unit_id: u.id, order: "survey", target_id: b.id }),
+    });
+  } catch (_) {}
 
   const fmt = (e) => {
     if (!e) return "";
     if (e.years >= 0.5) return ` (~${e.years.toFixed(1)} y)`;
-    return ` (~${e.months.toFixed(1)} mo)`;
+    if (e.months > 0) return ` (~${e.months.toFixed(1)} mo)`;
+    return "";
   };
 
-  const sites = b.mine_sites || [];
-  const surveyingHere =
-    u.status === "working" && u.order === "survey" && u.location_id === b.id;
-
   let html = "";
-  // Core orders
-  const core = [
-    { order: "move", label: `Move to ${b.name}${fmt(eMove)}`, need: null, target: b.id },
-    {
-      order: "survey",
-      label: surveyingHere
-        ? `Surveying ${b.name}… (${(b.survey_months || 0).toFixed(1)} mo) — warp for more detail`
-        : `Survey ${b.name}${fmt(eSurvey)} (continuous)`,
-      need: "survey",
-      target: b.id,
-      dis: surveyingHere,
-    },
-    { order: "idle", label: "Stand by / recall", need: null, target: b.id },
-  ];
+  html += btn("move", `Move to ${b.name}${fmt(estMove)}`, b.id, !busy);
+  html += btn(
+    "survey",
+    surveyingHere
+      ? `Surveying… ${((b.survey_months || 0).toFixed(1))} mo — warp for detail`
+      : `Survey ${b.name}${fmt(estSurvey)}`,
+    b.id,
+    caps.includes("survey") && !surveyingHere && !(busy && u.order !== "survey")
+  );
+  html += btn("idle", "Stand by / recall", b.id, true);
 
-  html += core
-    .map((r) => {
-      const ok = !r.need || caps.includes(r.need);
-      const dis = busy && r.order !== "idle" ? true : r.dis || !ok;
-      // allow idle even when surveying
-      const reallyDis = r.order === "idle" ? false : dis;
-      return `<button type="button" class="order" data-order="${r.order}" data-target="${r.target}"
-        ${reallyDis && r.order !== "idle" ? "disabled" : ""}>${r.label}</button>`;
-    })
-    .join("");
-
-  html += `<h2 style="margin-top:10px">Mine sites on ${b.name}</h2>`;
+  html += `<h2>Mine sites</h2>`;
   if (!sites.length) {
-    html += `<p class="muted">No sites yet. Park a survey sat and wait — you cannot dig the whole planet.</p>`;
+    html += `<p class="muted">No sites yet — survey longer.</p>`;
   } else {
-    html += sites
-      .map((s) => {
-        const canMine = caps.includes("mine");
-        return `<button type="button" class="order" data-order="mine" data-target="${s.id}"
-          ${busy || !canMine ? "disabled" : ""}>
-          Mine ${s.resource} @ ${s.region} (~${Math.round(s.amount_t)} t, g${s.grade})
-        </button>`;
-      })
-      .join("");
+    for (const s of sites) {
+      html += btn(
+        "mine",
+        `Mine ${s.resource} @ ${s.region}`,
+        s.id,
+        caps.includes("mine") && !busy
+      );
+    }
   }
-
-  html += busy
-    ? `<p class="muted">Unit busy — Warp advances transit / survey months.</p>`
-    : `<p class="muted">Survey stays until Stand by. Sites unlock only after enough detail.</p>`;
-
   el.innerHTML = html;
 
-  el.querySelectorAll("[data-order]").forEach((btn) => {
-    btn.onclick = async () => {
+  function btn(order, label, target, enabled) {
+    return `<button type="button" class="order" data-order="${order}" data-target="${target}" ${
+      enabled ? "" : "disabled"
+    }>${label}</button>`;
+  }
+
+  el.querySelectorAll("[data-order]").forEach((button) => {
+    button.onclick = async () => {
       try {
         state = await api("/api/order", {
           method: "POST",
           body: JSON.stringify({
             unit_id: u.id,
-            order: btn.dataset.order,
-            target_id: btn.dataset.target || b.id,
+            order: button.dataset.order,
+            target_id: button.dataset.target,
           }),
         });
         render();
       } catch (e) {
-        alert(String(e.message || e).slice(0, 300));
+        alert(String(e.message || e).slice(0, 280));
       }
     };
   });
@@ -334,13 +323,10 @@ function renderBuild() {
   const panel = $("build-panel");
   if (!panel || state.phase !== "system") return;
   const b = bodyById(selectedBodyId);
-  const u = unitById(selectedUnitId);
-  // Build choices when a body is selected; ark preferred but any selection ok
   panel.hidden = !b;
   if (!b) return;
   const power = $("power-id").value;
-  const hints = state.build_options?.power?.[power]?.description || "";
-  $("build-hint").textContent = hints;
+  $("build-hint").textContent = state.build_options?.power?.[power]?.description || "";
   $("btn-plan").onclick = async () => {
     try {
       state = await api("/api/plan_base", {
@@ -353,48 +339,40 @@ function renderBuild() {
       });
       render();
     } catch (e) {
-      alert(String(e.message || e).slice(0, 300));
+      alert(String(e.message || e).slice(0, 280));
     }
   };
-  $("power-id").onchange = () => renderBuild();
 }
 
 function renderProjects() {
   const el = $("projects");
   if (!el) return;
   const list = state.projects || [];
-  if (!list.length) {
-    el.innerHTML = '<p class="empty">None — found a project on a target body.</p>';
-    return;
-  }
-  el.innerHTML = list
-    .map((p) => {
-      const b = bodyById(p.body_id);
-      return `<div class="card"><h3>${p.name} <span class="badge">${p.status}</span></h3>
-        <p>${b ? b.name : p.body_id} · ${p.power_id} / ${p.hab_id}</p>
-        <p>${(p.buildings || []).join(", ")}</p></div>`;
-    })
-    .join("");
+  el.innerHTML = list.length
+    ? list
+        .map((p) => {
+          const b = bodyById(p.body_id);
+          return `<div class="card"><h3>${p.name}</h3><p>${b ? b.name : p.body_id} · ${p.status}</p></div>`;
+        })
+        .join("")
+    : '<p class="empty">None</p>';
 }
 
 function renderContracts() {
   const el = $("contracts");
   if (!el) return;
   const open = (state.contracts || []).filter((c) => c.status === "open");
-  if (!open.length) {
-    el.innerHTML = '<p class="empty">No open needs.</p>';
-    return;
-  }
-  el.innerHTML = open
-    .map(
-      (c) => `<div class="card">
-      <h3>${c.title} <span class="badge open">need</span></h3>
+  el.innerHTML = open.length
+    ? open
+        .map(
+          (c) => `<div class="card">
+      <h3>${c.title}</h3>
       <p>${c.resource_name}: ${c.delivered_t}/${c.amount_t} t</p>
-      <p>${c.note || ""}</p>
-      <button data-deliver="${c.id}">Supply from ark cargo</button>
+      <button data-deliver="${c.id}">From ark cargo</button>
     </div>`
-    )
-    .join("");
+        )
+        .join("")
+    : '<p class="empty">No open needs</p>';
   el.querySelectorAll("[data-deliver]").forEach((btn) => {
     btn.onclick = async () => {
       try {
@@ -404,7 +382,7 @@ function renderContracts() {
         });
         render();
       } catch (e) {
-        alert(String(e.message || e).slice(0, 300));
+        alert(String(e.message || e).slice(0, 280));
       }
     };
   });
@@ -429,179 +407,13 @@ function renderEvents() {
     .join("");
 }
 
-function renderLegend() {
-  const el = $("map-legend");
-  if (!el || state.phase !== "system" || !state.system) {
-    if (el) el.textContent = "";
-    return;
-  }
-  const max = state.system.max_au || "?";
-  const snow = state.system.snow_line_au || "?";
-  el.innerHTML = `Map: √AU scale (outer system is far).<br/>System ~${max} AU · snow line ${snow} AU<br/>Periods are Keplerian (Jupiter-class ~12 y).`;
-}
-
-/** Map projection: sqrt(|r|) keeps outer giants on screen without lying about order. */
-function project(x_au, y_au, scale, cx, cy) {
-  const r = Math.hypot(x_au, y_au);
-  if (r < 1e-9) return [cx, cy];
-  const pr = Math.sqrt(r) * scale;
-  return [cx + (x_au / r) * pr, cy + (y_au / r) * pr];
-}
-
-function mapLayout(w, h) {
-  const bodies = state.system?.bodies || [];
-  let maxA = 1;
-  bodies.forEach((b) => {
-    if (b.kind !== "moon") {
-      maxA = Math.max(maxA, Math.hypot(b.x_au || 0, b.y_au || 0), b.semi_major_au || 0);
-    }
-  });
-  const scale = (Math.min(w, h) * 0.44) / Math.sqrt(maxA);
-  return { scale, cx: w / 2, cy: h / 2, maxA };
-}
-
-function drawMap() {
-  const canvas = $("map");
-  const parent = canvas.parentElement;
-  const w = parent.clientWidth;
-  const h = parent.clientHeight;
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, w, h);
-
-  if (state.phase === "menu") {
-    ctx.fillStyle = "#7d8fa3";
-    ctx.font = "15px system-ui";
-    ctx.textAlign = "center";
-    ctx.fillText("Survey stars — pick a system you can see", w / 2, h / 2);
-    return;
-  }
-  if (state.phase === "transit") {
-    ctx.fillStyle = "#fff";
-    for (let i = 0; i < 100; i++) {
-      ctx.fillRect(((i * 97) % w), ((i * 53) % h), 1.2, 1.2);
-    }
-    ctx.fillStyle = "#7d8fa3";
-    ctx.font = "15px system-ui";
-    ctx.textAlign = "center";
-    ctx.fillText("Deep space — warp to arrival to see the system", w / 2, h / 2);
-    return;
-  }
-  if (!state.system) return;
-
-  const { scale, cx, cy, maxA } = mapLayout(w, h);
-  const bodies = state.system.bodies || [];
-
-  // Orbit rings (planets / asteroids) in √AU space
-  ctx.strokeStyle = "#1a2836";
-  ctx.lineWidth = 1;
-  bodies
-    .filter((b) => b.kind === "planet" || b.kind === "asteroid")
-    .forEach((b) => {
-      const a = b.semi_major_au || 0;
-      const pr = Math.sqrt(a) * scale;
-      ctx.beginPath();
-      ctx.arc(cx, cy, pr, 0, Math.PI * 2);
-      ctx.stroke();
-    });
-
-  // Star
-  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, 14);
-  g.addColorStop(0, "#fff8e0");
-  g.addColorStop(0.5, "#ffd27a");
-  g.addColorStop(1, "rgba(0,0,0,0)");
-  ctx.fillStyle = g;
-  ctx.beginPath();
-  ctx.arc(cx, cy, 14, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Bodies — small dots (planets are not huge)
-  bodies.forEach((b) => {
-    const [x, y] = project(b.x_au || 0, b.y_au || 0, scale, cx, cy);
-    let r = 2.2;
-    let color = "#8899aa";
-    if (b.kind === "planet") {
-      if (b.planet_class === "gas_giant") {
-        r = 4.5;
-        color = "#d4a574";
-      } else if (b.planet_class === "ice_giant") {
-        r = 3.5;
-        color = "#7ec8e3";
-      } else {
-        r = 2.8;
-        color = b.metal_likely ? "#c0a080" : "#9aa7b5";
-      }
-    } else if (b.kind === "moon") {
-      r = 1.6;
-      color = "#b8c0c8";
-    } else if (b.kind === "asteroid") {
-      r = 1.4;
-      color = "#666";
-    }
-
-    if (b.id === selectedBodyId) {
-      ctx.strokeStyle = "#4aa3f0";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(x, y, r + 5, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-
-    if (b.kind === "planet") {
-      ctx.fillStyle = "#a8b4c0";
-      ctx.font = "10px system-ui";
-      ctx.textAlign = "left";
-      // Map: name only. Period / AU / Δv live in the target facts card.
-      ctx.fillText(b.name, x + r + 4, y + 3);
-    }
-  });
-
-  // Fleet markers at their locations
-  (state.fleet || []).forEach((u) => {
-    const b = bodyById(u.location_id);
-    if (!b) return;
-    const [x, y] = project(b.x_au || 0, b.y_au || 0, scale, cx, cy);
-    ctx.strokeStyle = u.id === selectedUnitId ? "#4aa3f0" : "#3ecf8e";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x - 6, y - 6, 12, 12);
-  });
-}
-
-// Click map: pick body (coordinate-correct for canvas size)
-$("map").addEventListener("click", (ev) => {
-  if (state?.phase !== "system" || !state.system) return;
-  const canvas = $("map");
-  const rect = canvas.getBoundingClientRect();
-  const mx = ((ev.clientX - rect.left) / rect.width) * canvas.width;
-  const my = ((ev.clientY - rect.top) / rect.height) * canvas.height;
-  const { scale, cx, cy } = mapLayout(canvas.width, canvas.height);
-
-  let best = null;
-  let bestD = 18;
-  (state.system.bodies || []).forEach((b) => {
-    const [x, y] = project(b.x_au || 0, b.y_au || 0, scale, cx, cy);
-    const d = Math.hypot(mx - x, my - y);
-    if (d < bestD) {
-      bestD = d;
-      best = b.id;
-    }
-  });
-  if (best) {
-    selectedBodyId = best;
-    render();
-  }
-});
+// Panel toggles
+$("toggle-left").onclick = () => $("panel-left").classList.toggle("collapsed");
+$("toggle-right").onclick = () => $("panel-right").classList.toggle("collapsed");
 
 $("btn-catalog").onclick = async () => {
   state = await api("/api/catalog", { method: "POST", body: "{}" });
+  $("panel-left").classList.remove("collapsed");
   render();
 };
 $("btn-warp").onclick = async () => {
@@ -610,18 +422,30 @@ $("btn-warp").onclick = async () => {
 };
 $("btn-warp-transit").onclick = () => $("btn-warp").click();
 $("btn-reset").onclick = async () => {
-  if (!confirm("Reset colony room?")) return;
+  if (!confirm("Reset?")) return;
   state = await api("/api/reset", { method: "POST", body: "{}" });
   selectedUnitId = null;
   selectedBodyId = null;
+  map.clearSystem();
   render();
 };
+$("btn-focus-system").onclick = () => map.focusSystem();
+$("btn-focus-sel").onclick = () => {
+  if (selectedBodyId) map.focusBody(selectedBodyId);
+  else map.focusSystem();
+};
 
+initMap();
 setInterval(async () => {
   if (document.hidden) return;
   try {
+    const prevSeed = state?.system?.seed;
     state = await api("/api/state");
+    // light update without rebuilding whole UI thrash
     render();
+    if (state?.system && prevSeed === state.system.seed) {
+      map.updatePositions(state.system);
+    }
   } catch (_) {}
 }, 3000);
 
