@@ -167,14 +167,28 @@ function openUnitCascade(unitId, tab) {
   const u = unitById(unitId);
   if (!u) return;
   selectedUnitId = unitId;
-  const defaultTab = u.kind === "survey" ? "actions" : "actions";
   const keepTab =
     cascade && cascade.kind === "unit" && cascade.unitId === unitId ? cascade.tab : null;
   cascade = {
     kind: "unit",
     unitId,
-    tab: tab || keepTab || defaultTab,
+    tab: tab || keepTab || "actions",
   };
+  renderSafe();
+}
+
+/** Open body command card over the map (ark-style tabs). */
+function openBodyCascade(bodyId, tab) {
+  if (!bodyId || !bodyById(bodyId)) return;
+  selectedBodyId = bodyId;
+  const keepTab =
+    cascade && cascade.kind === "body" && cascade.bodyId === bodyId ? cascade.tab : null;
+  cascade = {
+    kind: "body",
+    bodyId,
+    tab: tab || keepTab || "overview",
+  };
+  if (map) map.setSelected(bodyId);
   renderSafe();
 }
 
@@ -260,7 +274,7 @@ function dvBarHtml(u) {
   </div>`;
 }
 
-function selectBody(id, { focus = true, openRight = true } = {}) {
+function selectBody(id, { focus = true, openRight = true, openCard = true } = {}) {
   selectedBodyId = id;
   if (openRight) $("panel-right").classList.remove("collapsed");
   if (map) {
@@ -268,9 +282,14 @@ function selectBody(id, { focus = true, openRight = true } = {}) {
     if (focus) map.focusBody(id);
   }
   renderBodyTree();
-  renderBodyPanel();
-  renderOrders();
-  renderBuild();
+  // Body details live in the cascade card (not buried under the list)
+  if (openCard && id && state?.phase === "system") {
+    openBodyCascade(id);
+  } else {
+    renderBodyPanel();
+    renderOrders();
+    renderBuild();
+  }
 }
 
 function renderBodyTree() {
@@ -392,7 +411,7 @@ function renderEventSchedule() {
     .join("");
 }
 
-/** Large command window cascade (ark console, unit action cards). */
+/** Large command window cascade (ark console, unit action cards, body cards). */
 function renderCascade() {
   const root = $("cascade");
   if (!root) return;
@@ -428,8 +447,462 @@ function renderCascade() {
     return;
   }
 
+  if (cascade.kind === "body") {
+    const b = bodyById(cascade.bodyId);
+    if (!b) {
+      cascade = null;
+      root.hidden = true;
+      return;
+    }
+    renderBodyCascade(root, b);
+    return;
+  }
+
   cascade = null;
   root.hidden = true;
+}
+
+function renderBodyCascade(root, b) {
+  root.hidden = false;
+  root.querySelector(".cascade-window")?.classList.add("unit-card");
+  root.querySelector(".cascade-window")?.classList.add("body-card");
+  const tab = cascade.tab || "overview";
+  cascade.tab = tab;
+
+  const kindLabel = b.planet_class || b.kind;
+  $("cascade-kicker").textContent = `${kindLabel} · body card`;
+  $("cascade-title").textContent = b.name;
+  const bits = [];
+  if (b.semi_major_au != null) bits.push(`${b.semi_major_au} AU`);
+  if (b.period_label) bits.push(b.period_label);
+  if (b.surface_g != null) bits.push(`${b.surface_g} g`);
+  $("cascade-sub").textContent = bits.join(" · ") || b.density_hint || "";
+
+  const tabs = [
+    { id: "overview", label: "Overview" },
+    { id: "intel", label: "Intel" },
+    { id: "tasks", label: "Tasks" },
+    { id: "site", label: "Site & lift" },
+  ];
+  $("cascade-tabs").innerHTML = tabs
+    .map(
+      (t) =>
+        `<button type="button" class="cascade-tab ${t.id === tab ? "active" : ""}" data-tab="${t.id}">${t.label}</button>`
+    )
+    .join("");
+  $("cascade-tabs").querySelectorAll("[data-tab]").forEach((btn) => {
+    btn.onclick = () => {
+      cascade = { kind: "body", bodyId: b.id, tab: btn.dataset.tab };
+      renderCascade();
+    };
+  });
+
+  const bodyEl = $("cascade-body");
+  if (tab === "intel") bodyEl.innerHTML = bodyCascadeIntelHtml(b);
+  else if (tab === "tasks") bodyEl.innerHTML = bodyCascadeTasksHtml(b);
+  else if (tab === "site") bodyEl.innerHTML = bodyCascadeSiteHtml(b);
+  else bodyEl.innerHTML = bodyCascadeOverviewHtml(b);
+
+  bindBodyCascade(bodyEl, b, tab);
+}
+
+function bodyCascadeOverviewHtml(b) {
+  let orbitFact = "";
+  if (b.kind === "moon") {
+    const p = bodyById(b.parent_id);
+    orbitFact = `<p><strong>Orbit</strong> moon of ${p ? p.name : b.parent_id}</p>
+      <p><strong>Period</strong> ${b.period_label || "—"}</p>`;
+  } else {
+    orbitFact = `<p><strong>a</strong> ${b.semi_major_au ?? "—"} AU</p>
+      <p><strong>Period</strong> ${b.period_label || "—"}</p>
+      <p><strong>Mass</strong> ${b.mass_earth ?? "—"} M⊕</p>`;
+  }
+  const bld = (b.site_buildings || []).filter((x) => x && x !== "ark");
+  const powerMw = b.site_power_mw || 0;
+  return `
+    <p class="cascade-section-lead">
+      ${b.kind}${b.planet_class ? " / " + b.planet_class : ""} · ${b.density_hint || "—"}
+    </p>
+    <div class="cascade-split">
+      <div class="card">
+        <h3>Orbit &amp; gravity</h3>
+        ${orbitFact}
+        <p><strong>Δv</strong> ↑orbit ${b.dv_to_orbit_m_s} · esc ${b.dv_escape_from_orbit_m_s} m/s</p>
+        <p><strong>Surface g</strong> ${b.surface_g != null ? b.surface_g + " g" : "—"}</p>
+        <button type="button" class="primary" id="bc-focus" style="width:100%;margin-top:8px">Focus in map</button>
+      </div>
+      <div class="card">
+        <h3>Site status</h3>
+        <p><strong>Power</strong> ${powerMw} MW</p>
+        <p><strong>Survey time</strong> ${(b.survey_months || 0).toFixed(1)} mo on station</p>
+        <p><strong>Buildings</strong> ${bld.length ? bld.join(", ") : "none"}</p>
+        <p class="muted">${
+          b.mass_driver_online
+            ? "⚡ Mass driver online"
+            : b.has_mass_driver
+              ? "⚡ Mass driver unpowered"
+              : b.mass_driver_ok
+                ? "Light well — mass driver possible"
+                : "Deep well — chemical lift"
+        }</p>
+      </div>
+    </div>
+    ${
+      b.terraform_dossier && b.terraform_dossier.level
+        ? `<h2>Terraform</h2>${terraformDossierHtml(b.terraform_dossier)}`
+        : `<p class="muted">No terraform dossier yet — ark scan goal or probe survey.</p>`
+    }
+  `;
+}
+
+function bodyCascadeIntelHtml(b) {
+  const depLines = (b.deposits || [])
+    .map((d) => {
+      if (d.detail <= 0) return null;
+      if (d.detail === 1) return `· ${d.resource_hint || "anomaly"} (${d.hint})`;
+      let s = `· <strong>${d.resource}</strong> (${d.hint})`;
+      if (d.grade != null) s += ` · grade ${d.grade}`;
+      const tons = tonsLabel(d);
+      if (tons) s += ` · ${tons}`;
+      return s;
+    })
+    .filter(Boolean)
+    .join("<br/>");
+  const sites = (b.mine_sites || [])
+    .map((s) => {
+      const tons = tonsLabel(s) || formatTons(s.amount_t);
+      return `· <strong>${s.resource}</strong> @ ${s.region} · grade ${s.grade}${
+        tons ? " · " + tons : ""
+      }`;
+    })
+    .join("<br/>");
+  return `
+    <p class="cascade-section-lead">Composition intel and extraction sites. Survey probes deepen this over time.</p>
+    <div class="card">
+      <h3>Composition</h3>
+      <p>${depLines || '<span class="muted">No composition intel yet</span>'}</p>
+    </div>
+    <div class="card">
+      <h3>Extraction sites</h3>
+      <p>${sites || '<span class="muted">None yet — survey until a site unlocks</span>'}</p>
+    </div>
+    ${
+      b.terraform_dossier && b.terraform_dossier.level
+        ? `<h2>Terraform dossier</h2>${terraformDossierHtml(b.terraform_dossier)}`
+        : ""
+    }
+  `;
+}
+
+function bodyCascadeTasksHtml(b) {
+  const fleet = state.fleet || [];
+  const u = unitById(selectedUnitId);
+  const unitOpts = fleet
+    .filter((x) => x.kind !== "ark")
+    .map(
+      (x) =>
+        `<option value="${x.id}" ${x.id === selectedUnitId ? "selected" : ""}>${x.name} (${x.kind}${
+          x.status !== "idle" ? " · " + x.status : ""
+        })</option>`
+    )
+    .join("");
+  let tasks = "";
+  if (!u || u.kind === "ark") {
+    tasks = `<p class="muted">Pick a fleet unit above (survey sat, miner, hauler) to order it here.</p>`;
+  } else {
+    tasks = `<div id="bc-task-list" class="choice-grid"><p class="muted">Loading tasks…</p></div>`;
+  }
+  return `
+    <p class="cascade-section-lead">
+      Apply a unit’s capabilities to <strong>${b.name}</strong>. Select who acts, then issue an order.
+    </p>
+    <div class="card">
+      <label>Acting unit
+        <select id="bc-unit">${unitOpts || '<option value="">No field units — build on the ark</option>'}</select>
+      </label>
+    </div>
+    ${tasks}
+  `;
+}
+
+function bodyCascadeSiteHtml(b) {
+  const stock = b.site_stockpile || {};
+  const stockKeys = Object.keys(stock).filter((k) => stock[k] > 0.05 && k !== "chem_prop");
+  const stockLines = Object.keys(stock)
+    .sort()
+    .map((k) => `· ${k}: ${stock[k]} t`)
+    .join("<br/>");
+  const powerMw = b.site_power_mw || 0;
+  const needMw = b.mass_driver_power_need_mw || 18;
+  const driverOnline = b.mass_driver_online;
+  const hasDriver = b.has_mass_driver;
+
+  let launch = "";
+  if (hasDriver) {
+    launch = `
+      <div class="card">
+        <h3>Mass driver launch</h3>
+        <p class="muted">${
+          driverOnline
+            ? `Electric lift · ${powerMw} MW bus (need ≥${needMw} MW)`
+            : `Unpowered · ${powerMw}/${needMw} MW — add solar farm or chem genset`
+        }</p>
+        ${
+          stockKeys.length
+            ? `<label>Cargo
+          <select id="bc-md-resource">${stockKeys
+            .map((k) => `<option value="${k}">${k} (${stock[k]} t)</option>`)
+            .join("")}</select>
+        </label>
+        <label>Amount (t)
+          <input id="bc-md-amount" type="number" value="${Math.min(20, stock[stockKeys[0]] || 10)}" min="0.1" step="1" />
+        </label>
+        <label>Destination
+          <select id="bc-md-dest">
+            <option value="ark">Colony Ark</option>
+            ${(state.system.bodies || [])
+              .filter((x) => x.id !== b.id)
+              .map((x) => `<option value="${x.id}">${x.name}</option>`)
+              .join("")}
+          </select>
+        </label>
+        <button type="button" class="primary" id="bc-md-fire" style="width:100%;margin-top:10px" ${
+          driverOnline ? "" : "disabled"
+        }>${driverOnline ? "Fire mass driver" : "No power — cannot fire"}</button>`
+            : `<p class="muted">Stockpile empty — mine first.</p>`
+        }
+      </div>`;
+  } else if (b.mass_driver_ok) {
+    launch = `<p class="muted">Light well — build a mass driver (ark fab) for rail lift.</p>`;
+  }
+
+  return `
+    <p class="cascade-section-lead">Surface stockpile, industrial lift, and founding a project on this body.</p>
+    <div class="cascade-split">
+      <div class="card">
+        <h3>Surface stockpile</h3>
+        <p>${stockLines || '<span class="muted">Empty</span>'}</p>
+      </div>
+      <div class="card">
+        <h3>Found project</h3>
+        <label>Power
+          <select id="bc-power">
+            <option value="solar">Solar</option>
+            <option value="chemical">Chemical</option>
+            <option value="fusion">Fusion (long path)</option>
+          </select>
+        </label>
+        <label>Habitation
+          <select id="bc-hab">
+            <option value="underground">Underground</option>
+            <option value="surface">Surface</option>
+          </select>
+        </label>
+        <p class="muted" id="bc-build-hint"></p>
+        <button type="button" class="primary" id="bc-plan" style="width:100%;margin-top:8px">Found project here</button>
+      </div>
+    </div>
+    ${launch}
+  `;
+}
+
+async function fillBodyCascadeTasks(b) {
+  const el = $("bc-task-list");
+  if (!el) return;
+  const u = unitById(selectedUnitId);
+  if (!u || u.kind === "ark") {
+    el.innerHTML = `<p class="muted">Pick a field unit to order.</p>`;
+    return;
+  }
+  const caps = u.capabilities || [];
+  const busy = unitIsBusy(u);
+  const sites = b.mine_sites || [];
+  const surveyingHere =
+    u.status === "working" && u.order === "survey" && u.location_id === b.id;
+  const resNames = (state.tech && state.tech.resources) || {};
+  const searchable = b.searchable_resources || ["Fe", "Si", "Al", "H2O"];
+  const exhausted = new Set(b.seek_exhausted || []);
+  const foundRes = new Set((b.mine_sites || []).map((s) => s.resource));
+
+  let estMove = null;
+  try {
+    estMove = await api("/api/estimate_order", {
+      method: "POST",
+      body: JSON.stringify({ unit_id: u.id, order: "move", target_id: b.id }),
+    });
+  } catch (_) {}
+
+  const fmt = (e) => {
+    if (!e) return "";
+    if (e.years >= 0.5) return ` (~${e.years.toFixed(1)} y)`;
+    if (e.months > 0) return ` (~${e.months.toFixed(1)} mo)`;
+    return "";
+  };
+  const btn = (order, label, target, resource, enabled) =>
+    `<button type="button" class="order" data-order="${order}" data-target="${target}" data-resource="${
+      resource || ""
+    }" ${enabled ? "" : "disabled"}>${label}</button>`;
+
+  let html = "";
+  html += `<p class="muted">${u.name} · ${u.status}${u.order ? " / " + u.order : ""} · Δv ${
+    u.dv_capacity_m_s > 0 ? formatDv(u.dv_remaining_m_s) + " left" : "n/a"
+  }</p>`;
+  if (estMove && estMove.dv_m_s != null) {
+    html += `<p class="muted">Transit estimate${fmt(estMove)}${
+      estMove.dv_m_s ? " · burns " + formatDv(estMove.dv_m_s) : ""
+    }${estMove.can_afford_dv === false ? " · <span style='color:#e88'>insufficient Δv</span>" : ""}</p>`;
+  }
+  html += btn("move", `Move to ${b.name}${fmt(estMove)}`, b.id, "", !busy);
+  html += btn("idle", "Stand by / recall", b.id, "", true);
+
+  if (caps.includes("survey")) {
+    html += `<h2>Scan</h2>`;
+    if (surveyingHere) {
+      const what = u.search_resource
+        ? resNames[u.search_resource] || u.search_resource
+        : "broad composition";
+      const sm = u.search_resource
+        ? (b.seek_months && b.seek_months[u.search_resource]) || 0
+        : b.survey_months || 0;
+      html += `<div class="queue-job next"><div class="title">Surveying — ${what}</div>
+        <div class="meta">${Number(sm).toFixed(1)} mo on station · warp for progress</div></div>`;
+    } else {
+      html += btn("survey", `Scan ${b.name} (broad)`, b.id, "", !busy);
+      for (const res of searchable) {
+        const name = resNames[res] || res;
+        if (foundRes.has(res)) {
+          html += `<button type="button" class="order" disabled>Find ${name} — site found</button>`;
+        } else if (exhausted.has(res)) {
+          html += `<button type="button" class="order" disabled>Find ${name} — none here</button>`;
+        } else {
+          html += btn("survey", `Find sources of ${name}`, b.id, res, !busy);
+        }
+      }
+    }
+  }
+
+  if (caps.includes("mine") || sites.length) {
+    html += `<h2>Extraction</h2>`;
+    if (!sites.length) {
+      html += `<p class="muted">No mine sites yet.</p>`;
+    } else {
+      for (const s of sites) {
+        const tons = tonsLabel(s) || formatTons(s.amount_t);
+        const name = resNames[s.resource] || s.resource;
+        html += btn(
+          "mine",
+          `Extract ${name} @ ${s.region}${tons ? " · " + tons : ""}`,
+          s.id,
+          "",
+          caps.includes("mine") && !busy
+        );
+      }
+    }
+  }
+
+  if (caps.includes("haul") && u.kind !== "ark") {
+    html += `<h2>Logistics</h2>
+      <button type="button" class="order" id="bc-haul">Plan cargo transfer involving ${b.name}</button>`;
+  }
+
+  el.innerHTML = html;
+  el.querySelectorAll("[data-order]").forEach((button) => {
+    button.onclick = async () => {
+      try {
+        await issueUnitOrder(
+          u.id,
+          button.dataset.order,
+          button.dataset.target,
+          button.dataset.resource || ""
+        );
+        cascade = { kind: "body", bodyId: b.id, tab: "tasks" };
+        render();
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 320));
+      }
+    };
+  });
+  const haulBtn = $("bc-haul");
+  if (haulBtn) {
+    haulBtn.onclick = () => {
+      closeCascade();
+      $("panel-right").classList.remove("collapsed");
+      renderHaulPanel({ preferDest: b.id, forceOpen: true });
+      $("haul-panel")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    };
+  }
+}
+
+function bindBodyCascade(bodyEl, b, tab) {
+  if (tab === "overview") {
+    const fb = bodyEl.querySelector("#bc-focus");
+    if (fb) fb.onclick = () => map && map.focusBody(b.id);
+  }
+  if (tab === "tasks") {
+    const sel = bodyEl.querySelector("#bc-unit");
+    if (sel) {
+      sel.onchange = () => {
+        selectedUnitId = sel.value || null;
+        cascade = { kind: "body", bodyId: b.id, tab: "tasks" };
+        renderCascade();
+      };
+    }
+    fillBodyCascadeTasks(b);
+  }
+  if (tab === "site") {
+    const power = bodyEl.querySelector("#bc-power");
+    const hint = bodyEl.querySelector("#bc-build-hint");
+    const updateHint = () => {
+      if (hint && power) {
+        hint.textContent =
+          state.build_options?.power?.[power.value]?.description || "";
+      }
+    };
+    if (power) power.onchange = updateHint;
+    updateHint();
+    const plan = bodyEl.querySelector("#bc-plan");
+    if (plan) {
+      plan.onclick = async () => {
+        try {
+          state = await api("/api/plan_base", {
+            method: "POST",
+            body: JSON.stringify({
+              body_id: b.id,
+              power_id: power?.value || "solar",
+              hab_id: bodyEl.querySelector("#bc-hab")?.value || "underground",
+            }),
+          });
+          cascade = { kind: "body", bodyId: b.id, tab: "site" };
+          render();
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 320));
+        }
+      };
+    }
+    const fire = bodyEl.querySelector("#bc-md-fire");
+    if (fire) {
+      fire.onclick = async () => {
+        try {
+          state = await api("/api/mass_launch", {
+            method: "POST",
+            body: JSON.stringify({
+              origin_id: b.id,
+              dest_id: bodyEl.querySelector("#bc-md-dest")?.value || "ark",
+              resource: bodyEl.querySelector("#bc-md-resource")?.value,
+              amount_t: Math.max(
+                0.1,
+                Number(bodyEl.querySelector("#bc-md-amount")?.value) || 1
+              ),
+            }),
+          });
+          cascade = { kind: "body", bodyId: b.id, tab: "site" };
+          render();
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 320));
+        }
+      };
+    }
+  }
 }
 
 function renderSurveyCascade(root, u) {
@@ -1368,158 +1841,27 @@ function renderBodyPanel() {
   const b = bodyById(selectedBodyId);
   if (!b) {
     el.className = "empty";
-    el.textContent = "Click a body in the 3D map";
+    el.textContent = "Click a body — opens its command card over the map";
     return;
   }
+  // Compact strip: details live in the cascade card
   el.className = "card";
-  const sm = b.survey_months || 0;
-  const depLines = (b.deposits || [])
-    .map((d) => {
-      if (d.detail <= 0) return null;
-      if (d.detail === 1) return `· ${d.resource_hint || "anomaly"} (${d.hint})`;
-      let s = `· ${d.resource} (${d.hint})`;
-      if (d.grade != null) s += ` · grade ${d.grade}`;
-      const tons = tonsLabel(d);
-      if (tons) s += ` · ${tons}`;
-      return s;
-    })
-    .filter(Boolean)
-    .join("<br/>");
-  const sites = (b.mine_sites || [])
-    .map((s) => {
-      const tons = tonsLabel(s) || formatTons(s.amount_t);
-      return `· <strong>${s.resource}</strong> @ ${s.region} · grade ${s.grade}${tons ? " · " + tons : ""}`;
-    })
-    .join("<br/>");
-
-  let orbitFact = "";
-  if (b.kind === "moon") {
-    const p = bodyById(b.parent_id);
-    orbitFact = `<p><strong>Orbit</strong> moon of ${p ? p.name : b.parent_id}</p>
-      <p><strong>Period</strong> ${b.period_label || "—"}</p>`;
-  } else {
-    orbitFact = `<p><strong>a</strong> ${b.semi_major_au ?? "—"} AU</p>
-      <p><strong>Period</strong> ${b.period_label || "—"}</p>
-      <p><strong>Mass</strong> ${b.mass_earth ?? "—"} M⊕</p>`;
-  }
-
-  const stock = b.site_stockpile || {};
-  const stockKeys = Object.keys(stock).filter((k) => stock[k] > 0.05 && k !== "chem_prop");
-  const stockLines = Object.keys(stock)
-    .sort()
-    .map((k) => `· ${k}: ${stock[k]} t`)
-    .join("<br/>");
-  const bld = (b.site_buildings || []).filter((x) => x && x !== "ark");
-  const bldLine = bld.length ? bld.join(", ") : "";
-  const hasDriver = b.has_mass_driver;
-  const driverOnline = b.mass_driver_online;
-  const driverOk = b.mass_driver_ok;
-  const powerMw = b.site_power_mw || 0;
-  const needMw = b.mass_driver_power_need_mw || 18;
-  let liftNote = "";
-  if (driverOnline) {
-    liftNote = `<p class="muted" style="color:var(--good)">⚡ Mass driver online · ${powerMw} MW bus — rail launch (no chemical ascent).</p>`;
-  } else if (hasDriver) {
-    liftNote = `<p class="muted" style="color:#e8a23a">⚡ Mass driver built but unpowered · ${powerMw}/${needMw} MW — add solar farm or chem genset.</p>`;
-  } else if (driverOk) {
-    liftNote = `<p class="muted">Light well (~${b.dv_to_orbit_m_s} m/s ↑orbit) — mass driver + power plant possible (ark fab).</p>`;
-  } else {
-    liftNote = `<p class="muted">Deep well — mass drivers not practical; use chemical lift / haulers.</p>`;
-  }
-  const powerLine = `<p class="muted"><strong>Site power</strong> ${powerMw} MW${
-    bld.includes("solar_farm") || bld.includes("chem_genset") || bld.includes("ark")
-      ? ""
-      : " · no generators"
-  }</p>`;
-
-  let massLaunchHtml = "";
-  if (hasDriver && stockKeys.length) {
-    massLaunchHtml = `
-      <h2>Mass driver launch</h2>
-      <div class="card">
-        <p class="muted">${
-          driverOnline
-            ? `Shoot surface cargo electrically (${powerMw} MW bus, ≥${needMw} MW required).`
-            : `Needs ≥${needMw} MW — currently ${powerMw} MW. Build solar farm or chem genset first.`
-        }</p>
-        <label>Cargo
-          <select id="md-resource">${stockKeys
-            .map((k) => `<option value="${k}">${k} (${stock[k]} t)</option>`)
-            .join("")}</select>
-        </label>
-        <label>Amount (t)
-          <input id="md-amount" type="number" value="${Math.min(20, stock[stockKeys[0]] || 10)}" min="0.1" step="1" />
-        </label>
-        <label>Destination
-          <select id="md-dest">
-            <option value="ark">Colony Ark</option>
-            ${(state.system.bodies || [])
-              .filter((x) => x.id !== b.id)
-              .map((x) => `<option value="${x.id}">${x.name}</option>`)
-              .join("")}
-          </select>
-        </label>
-        <button type="button" class="primary" id="btn-mass-launch" style="width:100%;margin-top:10px" ${
-          driverOnline ? "" : "disabled"
-        }>
-          ${driverOnline ? "Fire mass driver" : "No power — cannot fire"}
-        </button>
-      </div>`;
-  }
-
-  el.innerHTML = `
-    <h3>${b.name}</h3>
-    <p class="muted">${b.kind}${b.planet_class ? " / " + b.planet_class : ""} · ${b.density_hint || ""}</p>
-    <button type="button" id="btn-focus-body" class="primary" style="width:100%;margin:6px 0">Focus in map</button>
-    <h2>Facts</h2>
-    ${orbitFact}
-    <p><strong>Δv</strong> ↑orbit ${b.dv_to_orbit_m_s} · esc ${b.dv_escape_from_orbit_m_s} m/s</p>
-    ${powerLine}
-    ${liftNote}
-    <p><strong>Site search</strong> ${sm.toFixed(1)} mo on station</p>
-    ${
-      b.terraform_dossier && b.terraform_dossier.level
-        ? `<h2>Terraform dossier</h2>${terraformDossierHtml(b.terraform_dossier)}`
-        : b.hab_intel
-          ? `<p class="muted">Terraform intel level ${b.hab_intel}/5</p>`
-          : ""
-    }
-    <h2>Intel</h2>
-    <p>${depLines || '<span class="muted">No composition intel yet</span>'}</p>
-    <h2>Extraction sites</h2>
-    <p>${sites || '<span class="muted">None yet — keep searching</span>'}</p>
-    <h2>Surface stockpile</h2>
-    <p>${stockLines || '<span class="muted">Empty — mine or deliver here</span>'}</p>
-    ${bldLine ? `<p class="muted">Buildings: ${bldLine}</p>` : ""}
-    ${massLaunchHtml}
-  `;
-  const fb = $("btn-focus-body");
-  if (fb) fb.onclick = () => map && map.focusBody(b.id);
-  const fire = $("btn-mass-launch");
-  if (fire) {
-    fire.onclick = async () => {
-      try {
-        state = await api("/api/mass_launch", {
-          method: "POST",
-          body: JSON.stringify({
-            origin_id: b.id,
-            dest_id: $("md-dest").value,
-            resource: $("md-resource").value,
-            amount_t: Math.max(0.1, Number($("md-amount").value) || 1),
-          }),
-        });
-        render();
-      } catch (e) {
-        alert(String(e.message || e).slice(0, 320));
-      }
-    };
-  }
+  el.innerHTML = `<h3>${b.name}</h3>
+    <p class="muted">${b.kind}${b.planet_class ? " / " + b.planet_class : ""} · card opens on select</p>
+    <button type="button" class="primary open-cascade-btn" id="btn-open-body-card">
+      Open body card
+    </button>`;
+  const btn = $("btn-open-body-card");
+  if (btn) btn.onclick = () => openBodyCascade(b.id);
 }
 
 async function renderOrders() {
   const panel = $("orders-panel");
   const el = $("orders");
   if (!panel || !el || state.phase !== "system") return;
+  // Tasks live on the body card — keep side panel free of scroll traps
+  panel.hidden = true;
+  return;
   const u = unitById(selectedUnitId);
   const b = bodyById(selectedBodyId);
   if (!u || !b) {
@@ -1659,26 +2001,8 @@ async function renderOrders() {
 function renderBuild() {
   const panel = $("build-panel");
   if (!panel || state.phase !== "system") return;
-  const b = bodyById(selectedBodyId);
-  panel.hidden = !b;
-  if (!b) return;
-  const power = $("power-id").value;
-  $("build-hint").textContent = state.build_options?.power?.[power]?.description || "";
-  $("btn-plan").onclick = async () => {
-    try {
-      state = await api("/api/plan_base", {
-        method: "POST",
-        body: JSON.stringify({
-          body_id: b.id,
-          power_id: $("power-id").value,
-          hab_id: $("hab-id").value,
-        }),
-      });
-      render();
-    } catch (e) {
-      alert(String(e.message || e).slice(0, 280));
-    }
-  };
+  // Found-project UI lives on the body card (Site & lift tab)
+  panel.hidden = true;
 }
 
 function renderHaulsList() {

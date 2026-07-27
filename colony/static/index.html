@@ -96,18 +96,16 @@
         </div>
         <div id="right-system" hidden>
           <h2>Bodies</h2>
-          <p class="muted">Planets · expand for moons · click to select</p>
+          <p class="muted">Click a body → command card over the map (tabs like the ark)</p>
           <div id="body-tree"></div>
 
-          <h2>Selected body</h2>
           <div id="body-panel" class="empty">Pick a body from the list or map</div>
           <div id="orders-panel" hidden>
-            <h2>Tasks</h2>
             <div id="orders" class="choice-grid"></div>
           </div>
           <div id="haul-panel" hidden>
             <h2>Cargo transfer</h2>
-            <p class="muted">Physics routes: propellant vs flight time. Pick a destination body, then a transfer option.</p>
+            <p class="muted">Physics routes: propellant vs flight time.</p>
             <div class="card">
               <label>Origin
                 <select id="haul-origin"></select>
@@ -128,24 +126,17 @@
             </div>
           </div>
           <div id="build-panel" hidden>
-            <h2>Build here</h2>
-            <div class="card">
-              <label>Power
-                <select id="power-id">
-                  <option value="solar">Solar</option>
-                  <option value="chemical">Chemical</option>
-                  <option value="fusion">Fusion (long path)</option>
-                </select>
-              </label>
-              <label>Habitation
-                <select id="hab-id">
-                  <option value="underground">Underground</option>
-                  <option value="surface">Surface</option>
-                </select>
-              </label>
-              <p class="muted" id="build-hint"></p>
-              <button type="button" id="btn-plan" class="primary">Found project</button>
-            </div>
+            <select id="power-id" hidden>
+              <option value="solar">Solar</option>
+              <option value="chemical">Chemical</option>
+              <option value="fusion">Fusion (long path)</option>
+            </select>
+            <select id="hab-id" hidden>
+              <option value="underground">Underground</option>
+              <option value="surface">Surface</option>
+            </select>
+            <p class="muted" id="build-hint" hidden></p>
+            <button type="button" id="btn-plan" hidden>Found project</button>
           </div>
           <h2>Projects</h2>
           <div id="projects"></div>

@@ -605,6 +605,10 @@ details.drawer summary {
 .cascade-window.unit-card {
   width: min(560px, calc(100vw - 32px));
 }
+.cascade-window.body-card {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(82vh, 760px);
+}
 
 @media (max-width: 700px) {
   .float-panel { width: min(300px, calc(100vw - 20px)); }
