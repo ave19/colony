@@ -319,8 +319,9 @@ class Game:
     ARK_SCAN_GOAL_SPECS = {
         "habitable": {
             "id": "habitable",
-            "label": "Find possible habitable bodies",
-            "description": "Remote assessment of HZ, atmosphere, and water signatures.",
+            "label": "Find terraform / habitability targets",
+            "description": "Scan for surface g, atmosphere, water, active core & magnetic field. "
+            "No magnetosphere ⇒ need an artificial L1 radiation shield.",
         },
         "Fe": {
             "id": "Fe",
@@ -385,13 +386,14 @@ class Game:
                 self._ark_seek_resource(spec["resource"], rate)
 
     def _ark_seek_habitable(self, months: float) -> None:
+        """Progressive terraform survey: g → atmosphere → water → core/magnetosphere."""
         assert self.system
-        from .system_gen import _habitable_zone, _snow_line_au
+        from .system_gen import _habitable_zone
         from .constants import AU_M
 
         lum = float(self.system.star.get("lum") or 1.0)
         hz_in, hz_out = _habitable_zone(lum)
-        # Prioritize rocky worlds near HZ
+        # Rocky planets first (true surface targets), then large moons near HZ planets
         candidates = [
             b
             for b in self.system.bodies
@@ -400,34 +402,197 @@ class Game:
         candidates.sort(
             key=lambda b: abs((b.semi_major_m / AU_M) - 0.5 * (hz_in + hz_out))
         )
+        # Append interesting moons of HZ-region planets
+        for p in list(candidates):
+            for m in self.system.bodies:
+                if m.kind == "moon" and m.parent_id == p.id and m.mass_kg > 5e21:
+                    if m not in candidates:
+                        candidates.append(m)
+
         for b in candidates:
-            if self.hab_intel.get(b.id, 0) >= 3:
+            if self.hab_intel.get(b.id, 0) >= 5:
                 continue
             self.hab_seek_months[b.id] = self.hab_seek_months.get(b.id, 0.0) + months
-            sm = self.hab_seek_months[b.id]
-            # thresholds for remote hab assessment
-            levels = [(0.8, 1), (2.0, 2), (3.5, 3)]
-            old = self.hab_intel.get(b.id, 0)
-            new = old
-            for t, lv in levels:
-                if sm >= t:
-                    new = max(new, lv)
-            if new > old:
-                self.hab_intel[b.id] = new
-                a_au = b.semi_major_m / AU_M
-                in_hz = hz_in <= a_au <= hz_out
-                has_h2o = any(d.resource == "H2O" for d in b.deposits)
-                note = {
-                    1: f"HZ context for {b.name}: a={a_au:.2f} AU ({'in' if in_hz else 'outside'} optimistic HZ)",
-                    2: f"Atmosphere check {b.name}: {b.atmosphere_note or 'no thick air noted'}",
-                    3: f"Habitability sketch {b.name}: "
-                    f"{'temperate band' if in_hz else 'extreme insolation'}; "
-                    f"{'water signatures possible' if has_h2o or b.ice_likely else 'dry priors'}; "
-                    f"{'atmosphere present' if b.has_atmosphere else 'airless/thin'}",
-                }.get(new, "")
-                if note:
-                    self._log("scan", f"Ark (habitable search): {note}")
-            break  # focus one body at a time for progressive feel
+            notes = self._advance_terraform_intel(b, remote=True)
+            if notes:
+                for n in notes:
+                    self._log("scan", f"Ark (terraform survey) {b.name}: {n}")
+            break  # focus one body at a time
+
+    def _advance_terraform_intel(self, body, *, remote: bool = True) -> List[str]:
+        """
+        Reveal terraform factors by seek months.
+        Levels:
+          1 insolation / HZ
+          2 surface g
+          3 atmosphere
+          4 water
+          5 core + magnetosphere + infrastructure needs
+        On-station probes advance ~2.5× faster than remote ark sensing.
+        """
+        from .system_gen import _habitable_zone
+        from .constants import AU_M
+        from .orbits import surface_gravity
+
+        assert self.system
+        sm = self.hab_seek_months.get(body.id, 0.0)
+        # thresholds (months of *seek* time)
+        if remote:
+            levels = [(0.7, 1), (1.6, 2), (2.8, 3), (4.0, 4), (5.5, 5)]
+        else:
+            levels = [(0.3, 1), (0.7, 2), (1.2, 3), (1.8, 4), (2.5, 5)]
+        old = self.hab_intel.get(body.id, 0)
+        new = old
+        for t, lv in levels:
+            if sm >= t:
+                new = max(new, lv)
+        if new <= old:
+            return []
+        self.hab_intel[body.id] = new
+
+        lum = float(self.system.star.get("lum") or 1.0)
+        hz_in, hz_out = _habitable_zone(lum)
+        if body.kind == "moon" and body.parent_id:
+            parent = self.system.body_by_id(body.parent_id)
+            a_au = (parent.semi_major_m / AU_M) if parent else 0.0
+        else:
+            a_au = body.semi_major_m / AU_M
+        in_hz = hz_in <= a_au <= hz_out if a_au > 0 else False
+        g_e = surface_gravity(body.mass_kg, body.radius_m) / 9.81
+        notes: List[str] = []
+        for lv in range(old + 1, new + 1):
+            if lv == 1:
+                notes.append(
+                    f"insolation: a≈{a_au:.2f} AU · "
+                    f"{'in optimistic HZ' if in_hz else 'outside temperate band'}"
+                )
+            elif lv == 2:
+                if g_e < 0.35:
+                    g_note = "low-g (light; easy lift, hard to hold air long-term)"
+                elif g_e <= 1.2:
+                    g_note = "comfortable surface g for settlement"
+                else:
+                    g_note = "high-g (costly surface ops / lift)"
+                notes.append(f"surface gravity ≈ {g_e:.2f} g — {g_note}")
+            elif lv == 3:
+                ac = body.atmosphere_class or ("substantial" if body.has_atmosphere else "none")
+                notes.append(
+                    f"atmosphere: {ac}"
+                    + (f" ({body.atmosphere_note})" if body.atmosphere_note else "")
+                )
+            elif lv == 4:
+                wc = body.water_class or "none"
+                notes.append(f"water inventory: {wc.replace('_', ' ')}")
+            elif lv == 5:
+                core = "active core (dynamo possible)" if body.has_active_core else "dead/cold core"
+                if body.has_magnetosphere:
+                    mag = "native magnetosphere — natural radiation shield"
+                    need = "no artificial L1 shield required for cosmic/solar wind"
+                else:
+                    mag = "no planetary magnetic field"
+                    need = (
+                        "terraform needs an artificial magnetosphere — "
+                        "e.g. a magnetic shield station at the sunward Lagrange point (L1)"
+                    )
+                notes.append(f"interior: {core}; {mag}")
+                notes.append(f"infrastructure: {need}")
+                score = self._terraform_score(body, in_hz, g_e)
+                notes.append(f"terraform viability sketch: {score}/10")
+        return notes
+
+    def _terraform_score(self, body, in_hz: bool, g_e: float) -> int:
+        """Rough 0–10 playable score once fully surveyed."""
+        score = 0
+        if body.planet_class == "rocky" or body.kind == "moon":
+            score += 2
+        if in_hz:
+            score += 2
+        if 0.4 <= g_e <= 1.3:
+            score += 2
+        elif 0.25 <= g_e < 0.4 or 1.3 < g_e <= 1.6:
+            score += 1
+        ac = body.atmosphere_class
+        if ac == "substantial":
+            score += 2
+        elif ac == "thin":
+            score += 1
+        wc = body.water_class
+        if wc == "surface_potential":
+            score += 2
+        elif wc in ("subsurface", "ice"):
+            score += 1
+        if body.has_magnetosphere:
+            score += 2
+        elif body.has_active_core:
+            score += 1  # might restore dynamo someday — still need shield for now
+        return min(10, score)
+
+    def terraform_dossier(self, body_id: str) -> dict:
+        """Fog-of-war terraform report for UI (only revealed fields)."""
+        from .system_gen import _habitable_zone
+        from .constants import AU_M
+        from .orbits import surface_gravity
+
+        if not self.system:
+            return {"body_id": body_id, "level": 0}
+        body = self.system.body_by_id(body_id)
+        if not body:
+            return {"body_id": body_id, "level": 0}
+        level = self.hab_intel.get(body_id, 0)
+        lum = float(self.system.star.get("lum") or 1.0)
+        hz_in, hz_out = _habitable_zone(lum)
+        if body.kind == "moon" and body.parent_id:
+            parent = self.system.body_by_id(body.parent_id)
+            a_au = (parent.semi_major_m / AU_M) if parent else None
+        else:
+            a_au = body.semi_major_m / AU_M if body.kind != "moon" else None
+        in_hz = bool(a_au is not None and hz_in <= a_au <= hz_out)
+        g_e = surface_gravity(body.mass_kg, body.radius_m) / 9.81
+
+        d: Dict[str, Any] = {
+            "body_id": body_id,
+            "name": body.name,
+            "level": level,
+            "level_max": 5,
+        }
+        if level >= 1:
+            d["semi_major_au"] = round(a_au, 3) if a_au is not None else None
+            d["in_hz"] = in_hz
+            d["insolation_note"] = (
+                "in optimistic habitable zone" if in_hz else "outside temperate insolation band"
+            )
+        if level >= 2:
+            d["surface_g"] = round(g_e, 3)
+            if g_e < 0.35:
+                d["g_class"] = "low"
+            elif g_e <= 1.2:
+                d["g_class"] = "comfortable"
+            else:
+                d["g_class"] = "high"
+        if level >= 3:
+            d["atmosphere_class"] = body.atmosphere_class
+            d["atmosphere_note"] = body.atmosphere_note
+            d["has_atmosphere"] = body.has_atmosphere
+        if level >= 4:
+            d["water_class"] = body.water_class
+        if level >= 5:
+            d["has_active_core"] = body.has_active_core
+            d["has_magnetosphere"] = body.has_magnetosphere
+            d["needs_l1_magnetic_shield"] = not body.has_magnetosphere and body.planet_class in (
+                "rocky",
+                "moon",
+            )
+            d["terraform_score"] = self._terraform_score(body, in_hz, g_e)
+            if d["needs_l1_magnetic_shield"]:
+                d["shield_note"] = (
+                    "No native magnetosphere — deploy a magnetic shield station "
+                    "at the sunward Lagrange point (L1) before open-air terraforming."
+                )
+            else:
+                d["shield_note"] = "Native magnetosphere provides radiation shielding."
+            # Is shield already built for this body?
+            d["l1_shield_online"] = self._has_building(body_id, "l1_magnetic_shield")
+        return d
 
     def _ark_seek_asteroids(self, months: float) -> None:
         assert self.system
@@ -587,6 +752,11 @@ class Game:
                 extra = " Feeding local power bus."
             elif job.building_id == "chem_genset":
                 extra = " Baseload available while chem_prop lasts."
+            elif job.building_id == "l1_magnetic_shield":
+                extra = (
+                    " Artificial magnetosphere online at sunward L1 — "
+                    "radiation shield for open-air settlement."
+                )
             self._log("build", f"Deployed {job.name} at {where}.{extra}")
             return
 
@@ -657,6 +827,16 @@ class Game:
                         f"(surface→orbit ~{dv:.0f} m/s; need ≤{MASS_DRIVER_MAX_SURFACE_DV_M_S:.0f} "
                         f"or an asteroid/moon-class light body)"
                     )
+            # L1 shield: only for rocky worlds / large moons without native field (or always allow as overkill)
+            if spec.get("building") == "l1_magnetic_shield":
+                if body.planet_class in ("gas_giant", "ice_giant", "asteroid"):
+                    raise ValueError(
+                        f"L1 magnetic shield is for rocky worlds/moons — not {body.planet_class}"
+                    )
+                # Prefer after survey knows they need it, but allow early build
+                if body.has_magnetosphere:
+                    # still allow deploy (redundant) but warn via log after
+                    pass
 
         for res, need in spec["cost"].items():
             have = self.ark_stock.get(res, 0.0)
@@ -1303,6 +1483,17 @@ class Game:
                 "scan",
                 f"{u.name} @ {body.name} ({label}, {seek_t:.1f} mo): " + "; ".join(notes),
             )
+        # On-station probes also deepen terraform dossiers (faster than remote ark)
+        if body.planet_class in ("rocky", "moon") or (
+            body.kind == "planet" and body.planet_class == "rocky"
+        ):
+            if self.hab_intel.get(body.id, 0) < 5:
+                self.hab_seek_months[body.id] = (
+                    self.hab_seek_months.get(body.id, 0.0) + months
+                )
+                tnotes = self._advance_terraform_intel(body, remote=False)
+                for n in tnotes:
+                    self._log("scan", f"{u.name} terraform intel @ {body.name}: {n}")
 
     def issue_order(
         self, unit_id: str, order: str, target_id: str = "", resource: str = ""
@@ -2121,6 +2312,15 @@ class Game:
             "ark_scan_goals": list(self.ark_scan_goals),
             "ark_scan_goal_specs": self.ARK_SCAN_GOAL_SPECS,
             "hab_intel": dict(self.hab_intel),
+            "terraform_dossiers": (
+                {
+                    bid: self.terraform_dossier(bid)
+                    for bid, lv in self.hab_intel.items()
+                    if lv > 0
+                }
+                if self.phase == "system"
+                else {}
+            ),
             "body_tree": self.body_tree() if self.phase == "system" else [],
             "home_body_id": self.home_body_id,
             "build_options": {
@@ -2132,7 +2332,18 @@ class Game:
             data["system"] = self.system.to_dict(self.sim_time_s)
             # attach hab_intel + site stockpile onto body dicts for UI convenience
             for b in data["system"].get("bodies", []):
-                b["hab_intel"] = self.hab_intel.get(b["id"], 0)
+                lv = self.hab_intel.get(b["id"], 0)
+                b["hab_intel"] = lv
+                if lv > 0:
+                    b["terraform_dossier"] = self.terraform_dossier(b["id"])
+                # Fog of war: hide unsurveyed terraform truth in API body dump
+                if lv < 5:
+                    b.pop("has_active_core", None)
+                    b.pop("has_magnetosphere", None)
+                if lv < 4:
+                    b.pop("water_class", None)
+                if lv < 3:
+                    b.pop("atmosphere_class", None)
                 site = self.sites.get(b["id"])
                 full_body = self.system.body_by_id(b["id"])
                 b["mass_driver_ok"] = self.body_allows_mass_driver(full_body)
@@ -2146,11 +2357,13 @@ class Game:
                     b["site_buildings"] = list(site.buildings)
                     b["has_mass_driver"] = "mass_driver" in site.buildings
                     b["mass_driver_online"] = self.mass_driver_online(b["id"])
+                    b["has_l1_shield"] = "l1_magnetic_shield" in site.buildings
                 else:
                     b["site_stockpile"] = {}
                     b["site_buildings"] = []
                     b["has_mass_driver"] = False
                     b["mass_driver_online"] = False
+                    b["has_l1_shield"] = False
         return data
 
 

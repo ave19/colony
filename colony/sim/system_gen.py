@@ -227,6 +227,13 @@ class Body:
     seek_months: Dict[str, float] = field(default_factory=dict)
     # Resources confirmed absent after a directed search
     seek_exhausted: List[str] = field(default_factory=list)
+    # Terraform / habitability truth (revealed gradually by scan)
+    has_active_core: bool = False
+    has_magnetosphere: bool = False
+    # none | ice | subsurface | surface_potential
+    water_class: str = "none"
+    # none | thin | substantial | giant_envelope
+    atmosphere_class: str = "none"
 
     def mu(self) -> float:
         return G * self.mass_kg
@@ -470,7 +477,89 @@ class StarSystem:
                 if b.kind == "moon" or period_days < 400
                 else f"{period_years:.1f} y"
             ),
+            # Truth for sim; UI should prefer terraform_dossier from Game for fog of war
+            "has_active_core": b.has_active_core,
+            "has_magnetosphere": b.has_magnetosphere,
+            "water_class": b.water_class,
+            "atmosphere_class": b.atmosphere_class,
         }
+
+
+def assign_terraform_truth(
+    body: Body,
+    rng: random.Random,
+    *,
+    au: float,
+    hz_in: float,
+    hz_out: float,
+) -> None:
+    """
+    Set core, magnetosphere, water, atmosphere classes from formation priors.
+    Call after mass/radius/atmo flags are set.
+    """
+    g_earth = surface_gravity(body.mass_kg, body.radius_m) / 9.81
+    me = body.mass_kg / EARTH_MASS
+    in_hz = hz_in <= au <= hz_out
+
+    if body.planet_class in ("gas_giant", "ice_giant"):
+        body.has_active_core = True  # dynamo-ish interior
+        body.has_magnetosphere = body.planet_class == "gas_giant" or rng.random() < 0.7
+        body.atmosphere_class = "giant_envelope"
+        body.water_class = "ice" if body.ice_likely else "none"
+        return
+
+    if body.kind == "asteroid":
+        body.has_active_core = False
+        body.has_magnetosphere = False
+        body.atmosphere_class = "none"
+        body.water_class = "ice" if body.ice_likely else "none"
+        return
+
+    # Rocky planet / moon
+    # Dynamo needs enough mass + not fully cooled (proxy: mass + metal)
+    if body.kind == "moon":
+        body.has_active_core = me > 0.01 and rng.random() < 0.12
+        body.has_magnetosphere = body.has_active_core and rng.random() < 0.35
+    else:
+        # Mars-like can lose dynamo; Earth-like keep it
+        p_core = 0.15 + 0.55 * min(me / 1.2, 1.0) + (0.1 if body.metal_likely else 0.0)
+        if me < 0.25:
+            p_core *= 0.35
+        body.has_active_core = rng.random() < p_core
+        # Magnetosphere: needs active core; weak g / thin bodies lose field more often
+        if body.has_active_core:
+            p_mag = 0.75 if me >= 0.6 else 0.4
+            if g_earth < 0.35:
+                p_mag *= 0.5
+            body.has_magnetosphere = rng.random() < p_mag
+        else:
+            body.has_magnetosphere = False
+
+    # Atmosphere class from flags + retention
+    if not body.has_atmosphere:
+        body.atmosphere_class = "none"
+    elif body.atmosphere_note and "H₂" in body.atmosphere_note:
+        body.atmosphere_class = "giant_envelope"
+    elif "thin" in (body.atmosphere_note or "").lower() or g_earth < 0.4:
+        body.atmosphere_class = "thin"
+    else:
+        body.atmosphere_class = "substantial"
+    # Without a magnetosphere, long-term air is fragile (still can have thin remnant)
+    if body.atmosphere_class == "substantial" and not body.has_magnetosphere and me < 0.8:
+        if rng.random() < 0.55:
+            body.atmosphere_class = "thin"
+            body.atmosphere_note = (body.atmosphere_note or "atmosphere") + " (strip-vulnerable)"
+
+    # Water
+    has_h2o_dep = any(d.resource == "H2O" for d in body.deposits)
+    if in_hz and (has_h2o_dep or body.ice_likely) and body.atmosphere_class in ("thin", "substantial"):
+        body.water_class = "surface_potential" if rng.random() < 0.55 else "subsurface"
+    elif body.ice_likely or has_h2o_dep:
+        body.water_class = "ice" if (body.ice_likely or au > hz_out) else "subsurface"
+    elif has_h2o_dep:
+        body.water_class = "subsurface"
+    else:
+        body.water_class = "none"
 
 
 def _snow_line_au(lum: float) -> float:
@@ -645,7 +734,7 @@ def _make_planet(
         note = "N₂/O₂/CO₂ mix possible" if atmo and hz_in <= au <= hz_out else ("thin CO₂" if atmo else "")
 
     # Convention: Sol-3 style — star proper name + orbit index from the star
-    return Body(
+    body = Body(
         id=f"p{i}",
         name=f"{star_name}-{i + 1}",
         kind="planet",
@@ -665,6 +754,8 @@ def _make_planet(
         metal_likely=metal,
         planet_class=pclass,
     )
+    assign_terraform_truth(body, rng, au=au, hz_in=hz_in, hz_out=hz_out)
+    return body
 
 
 def _moon_mass_kg(rng: random.Random, planet: Body) -> float:
@@ -777,28 +868,29 @@ def _make_moons(
         moon_ice = au > snow * 0.75 or planet.planet_class != "rocky" or rng.random() < 0.35
         moon_metal = rng.random() < 0.3
         roman = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"][m]
-        moons.append(
-            Body(
-                id=f"{planet.id}_m{m}",
-                name=f"{planet.name} {roman}",
-                kind="moon",
-                parent_id=planet.id,
-                mass_kg=m_mass,
-                radius_m=m_radius,
-                semi_major_m=sma,
-                phase0=rng.uniform(0, 2 * math.pi),
-                has_atmosphere=rng.random() < 0.08 and moon_ice,
-                atmosphere_note="tenuous" if moon_ice else "",
-                deposits=_deposits_for(
-                    rng, au, snow, "moon", moon_ice, moon_metal,
-                    body_mass_kg=m_mass, star_metallicity=star_metallicity,
-                ),
-                density_hint="icy" if moon_ice else ("dense" if moon_metal else "rocky"),
-                ice_likely=moon_ice,
-                metal_likely=moon_metal,
-                planet_class="moon",
-            )
+        moon = Body(
+            id=f"{planet.id}_m{m}",
+            name=f"{planet.name} {roman}",
+            kind="moon",
+            parent_id=planet.id,
+            mass_kg=m_mass,
+            radius_m=m_radius,
+            semi_major_m=sma,
+            phase0=rng.uniform(0, 2 * math.pi),
+            has_atmosphere=rng.random() < 0.08 and moon_ice,
+            atmosphere_note="tenuous" if moon_ice else "",
+            deposits=_deposits_for(
+                rng, au, snow, "moon", moon_ice, moon_metal,
+                body_mass_kg=m_mass, star_metallicity=star_metallicity,
+            ),
+            density_hint="icy" if moon_ice else ("dense" if moon_metal else "rocky"),
+            ice_likely=moon_ice,
+            metal_likely=moon_metal,
+            planet_class="moon",
         )
+        # Moons: use planet a for HZ water context
+        assign_terraform_truth(moon, rng, au=au, hz_in=0.0, hz_out=0.0)
+        moons.append(moon)
     return moons
 
 
@@ -826,7 +918,7 @@ def _make_asteroid(
         "D": "primitive / icy (D-type)",
     }[family]
 
-    return Body(
+    body = Body(
         id=f"a{a}",
         name=f"{star_name} Belt-{a + 1}",
         kind="asteroid",
@@ -844,6 +936,8 @@ def _make_asteroid(
         metal_likely=metal,
         planet_class="asteroid",
     )
+    assign_terraform_truth(body, rng, au=au, hz_in=0.0, hz_out=0.0)
+    return body
 
 
 def _crust_mass_t(body_mass_kg: float, fraction: float = 3e-4) -> float:

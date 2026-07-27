@@ -868,6 +868,55 @@ function renderArkCascade(root) {
   bindArkCascade(body, tab);
 }
 
+function terraformDossierHtml(d) {
+  if (!d || !d.level) return "";
+  const rows = [];
+  rows.push(`<div class="meta">Survey depth ${d.level}/${d.level_max}</div>`);
+  if (d.level >= 1) {
+    rows.push(
+      `<div>· <strong>Insolation</strong> ${d.insolation_note || ""}${
+        d.semi_major_au != null ? ` · ${d.semi_major_au} AU` : ""
+      }</div>`
+    );
+  }
+  if (d.level >= 2) {
+    rows.push(
+      `<div>· <strong>Surface g</strong> ${d.surface_g} g (${d.g_class || "—"})</div>`
+    );
+  }
+  if (d.level >= 3) {
+    rows.push(
+      `<div>· <strong>Atmosphere</strong> ${d.atmosphere_class || "—"}${
+        d.atmosphere_note ? " — " + d.atmosphere_note : ""
+      }</div>`
+    );
+  }
+  if (d.level >= 4) {
+    rows.push(
+      `<div>· <strong>Water</strong> ${(d.water_class || "none").replace(/_/g, " ")}</div>`
+    );
+  }
+  if (d.level >= 5) {
+    rows.push(
+      `<div>· <strong>Core</strong> ${d.has_active_core ? "active" : "cold/dead"} · <strong>Magnetosphere</strong> ${
+        d.has_magnetosphere ? "yes" : "none"
+      }</div>`
+    );
+    rows.push(`<div class="meta">${d.shield_note || ""}</div>`);
+    if (d.needs_l1_magnetic_shield) {
+      rows.push(
+        d.l1_shield_online
+          ? `<div style="color:var(--good)">L1 magnetic shield online</div>`
+          : `<div style="color:#e8a23a">Need L1 magnetic shield (ark fab → deploy on this body)</div>`
+      );
+    }
+    rows.push(`<div>· <strong>Terraform score</strong> ${d.terraform_score}/10</div>`);
+  } else {
+    rows.push(`<div class="meta">… deeper scan for water, core, magnetic field</div>`);
+  }
+  return `<div class="card" style="margin-bottom:8px"><h3>${d.name || d.body_id}</h3>${rows.join("")}</div>`;
+}
+
 function arkCascadeSurveyHtml() {
   const specs = state.ark_scan_goal_specs || {};
   const active = new Set(state.ark_scan_goals || []);
@@ -884,21 +933,20 @@ function arkCascadeSurveyHtml() {
       </label>`;
     })
     .join("");
-  const intel = Object.entries(state.hab_intel || {})
-    .filter(([, v]) => v > 0)
-    .map(([id, v]) => {
-      const b = bodyById(id);
-      return `<div class="meta">· ${b ? b.name : id} — hab intel ${v}/3</div>`;
-    })
+  const dossiers = Object.values(state.terraform_dossiers || {})
+    .sort((a, b) => (b.level || 0) - (a.level || 0))
+    .map((d) => terraformDossierHtml(d))
     .join("");
   return `
     <p class="cascade-section-lead">
-      Set what the ark keeps hunting for across the system. Remote sensing is slower than a probe on-station,
-      but it runs continuously and appears on the event schedule. ${n ? `<strong>${n} active.</strong>` : "None active yet."}
+      System-wide priorities. Terraform targets are scanned for <strong>surface g</strong>, <strong>atmosphere</strong>,
+      <strong>water</strong>, <strong>active core</strong>, and <strong>magnetic field</strong>.
+      Worlds without a magnetosphere need an artificial <strong>L1 radiation shield</strong> before open-air settlement.
+      ${n ? `<strong>${n} goal(s) active.</strong>` : "None active yet."}
     </p>
     <div class="priority-grid">${goals || '<p class="empty">No scan goals defined.</p>'}</div>
-    <h2 style="margin-top:18px">Habitability intel so far</h2>
-    ${intel || '<p class="muted">Enable “Find possible habitable bodies” to build this list.</p>'}
+    <h2 style="margin-top:18px">Terraform dossiers</h2>
+    ${dossiers || '<p class="muted">Enable “Find terraform / habitability targets” and warp for progressive intel.</p>'}
   `;
 }
 
@@ -954,7 +1002,7 @@ function arkCascadeFabHtml() {
       const cost = Object.entries(s.cost || {})
         .map(([k, v]) => `${v} t ${k}`)
         .join(", ");
-      // Mass driver: only list light-well bodies
+      // Filter deploy targets by structure type
       let destOpts;
       if (s.id === "mass_driver") {
         const light = bodies.filter((b) => b.mass_driver_ok);
@@ -968,6 +1016,29 @@ function arkCascadeFabHtml() {
               )
               .join("")
           : `<option value="">No light bodies available</option>`;
+      } else if (s.id === "l1_magnetic_shield") {
+        const rocky = bodies.filter(
+          (b) =>
+            b.planet_class === "rocky" ||
+            b.kind === "moon" ||
+            (b.kind === "planet" && b.planet_class === "rocky")
+        );
+        destOpts = rocky.length
+          ? rocky
+              .map((b) => {
+                const d = (state.terraform_dossiers || {})[b.id];
+                const need =
+                  d && d.level >= 5 && d.needs_l1_magnetic_shield
+                    ? " · needs shield"
+                    : d && d.level >= 5 && d.has_magnetosphere
+                      ? " · has field"
+                      : "";
+                return `<option value="${b.id}" ${
+                  b.id === selectedBodyId ? "selected" : ""
+                }>${b.name}${need}</option>`;
+              })
+              .join("")
+          : `<option value="">No rocky targets</option>`;
       } else {
         destOpts = bodyPickerOptions(selectedBodyId || state.home_body_id || "");
       }
@@ -1406,6 +1477,13 @@ function renderBodyPanel() {
     ${powerLine}
     ${liftNote}
     <p><strong>Site search</strong> ${sm.toFixed(1)} mo on station</p>
+    ${
+      b.terraform_dossier && b.terraform_dossier.level
+        ? `<h2>Terraform dossier</h2>${terraformDossierHtml(b.terraform_dossier)}`
+        : b.hab_intel
+          ? `<p class="muted">Terraform intel level ${b.hab_intel}/5</p>`
+          : ""
+    }
     <h2>Intel</h2>
     <p>${depLines || '<span class="muted">No composition intel yet</span>'}</p>
     <h2>Extraction sites</h2>

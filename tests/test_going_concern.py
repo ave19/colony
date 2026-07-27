@@ -168,6 +168,51 @@ def test_ark_scan_goal_habitable_and_iron():
     )
 
 
+def test_terraform_dossier_reveals_g_atmosphere_water_magnetosphere():
+    g = Game(universe_seed=8)
+    _arrive(g)
+    rocky = next(b for b in g.system.bodies if b.kind == "planet" and b.planet_class == "rocky")
+    # Fast-forward remote survey by injecting seek months
+    g.hab_seek_months[rocky.id] = 6.0
+    notes = g._advance_terraform_intel(rocky, remote=True)
+    assert g.hab_intel[rocky.id] >= 5
+    assert notes
+    d = g.terraform_dossier(rocky.id)
+    assert d["level"] == 5
+    assert "surface_g" in d
+    assert "atmosphere_class" in d
+    assert "water_class" in d
+    assert "has_magnetosphere" in d
+    assert "has_active_core" in d
+    assert "terraform_score" in d
+    if not d["has_magnetosphere"]:
+        assert d["needs_l1_magnetic_shield"] is True
+        assert "L1" in d["shield_note"] or "Lagrange" in d["shield_note"]
+
+
+def test_l1_shield_structure_builds_on_rocky():
+    g = Game(universe_seed=8)
+    _arrive(g)
+    rocky = next(b for b in g.system.bodies if b.kind == "planet" and b.planet_class == "rocky")
+    g.ark_stock["steel"] = 200
+    g.ark_stock["chip"] = 40
+    g.ark_stock["MAG"] = 20
+    g.ark_stock["panel"] = 50
+    g.ark_stock["Al"] = 40
+    g.queue_build("l1_magnetic_shield", deploy_body_id=rocky.id)
+    while any(j.status == "building" for j in g.build_queue):
+        g.warp_to_next_event(force=True)
+    assert "l1_magnetic_shield" in g.sites[rocky.id].buildings
+    # Gas giant should reject
+    giant = next((b for b in g.system.bodies if b.planet_class == "gas_giant"), None)
+    if giant:
+        try:
+            g.queue_build("l1_magnetic_shield", deploy_body_id=giant.id)
+            assert False
+        except ValueError as e:
+            assert "rocky" in str(e).lower() or "moon" in str(e).lower()
+
+
 def test_survey_probe_arrival_is_on_event_queue():
     g = Game(universe_seed=44)
     g.open_survey_archive()

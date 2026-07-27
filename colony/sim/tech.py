@@ -126,6 +126,14 @@ BUILDINGS = {
         "(≥18 MW) — pair with a solar farm or chem genset. Shoots cargo without chemical ascent.",
         ["mass_launch"],
     ),
+    "l1_magnetic_shield": BuildingType(
+        "l1_magnetic_shield",
+        "L1 magnetic shield",
+        {"steel": 120, "chip": 25, "MAG": 15, "panel": 40, "Al": 30},
+        "Station-kept artificial magnetosphere at the sunward Lagrange point. "
+        "Stands in for a missing planetary dynamo so air and settlers can survive solar wind.",
+        ["shield"],
+    ),
 }
 
 # Continuous power draw while the rail is armed / launching.
@@ -364,6 +372,17 @@ STRUCTURE_BUILDS = {
         "months": 4.0,
         "description": "Railgun for light wells. Requires ≥18 MW site power (solar farm and/or chem genset). "
         "Shoots ore without chemical ascent; assists bots leaving the body. Not for deep wells.",
+    },
+    "l1_magnetic_shield": {
+        "id": "l1_magnetic_shield",
+        "name": "L1 magnetic shield",
+        "kind": "structure",
+        "building": "l1_magnetic_shield",
+        "cost": {"steel": 120.0, "chip": 25.0, "MAG": 15.0, "panel": 40.0, "Al": 30.0},
+        "months": 6.0,
+        "description": "Artificial magnetosphere station at the sunward Lagrange point of a body. "
+        "Required for open-air terraforming when the world has no native magnetic field "
+        "(deflects solar wind / cosmic radiation). Deploy against the target planet/moon.",
     },
 }
 
