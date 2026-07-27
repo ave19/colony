@@ -19,9 +19,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .constants import AU_M, EARTH_MASS, EARTH_RADIUS, G, SOLAR_MASS
 from .orbits import (
+    density_sphere,
     dv_orbit_to_escape,
     dv_surface_to_orbit,
+    hill_radius,
+    mutual_hill_radius,
     period_seconds,
+    roche_limit_rigid,
     surface_gravity,
 )
 
@@ -556,10 +560,15 @@ def generate_system(seed: Optional[int] = None, star_type_id: Optional[str] = No
             filtered.append((au, role))
         planet_slots = filtered
 
+        star_mass_kg = star["mass"] * SOLAR_MASS
         for i, (au, role) in enumerate(planet_slots):
             body = _make_planet(rng, i, au, role, snow, hz_in, hz_out, star_name, star["metallicity"])
             bodies.append(body)
-            bodies.extend(_make_moons(rng, body, au, snow, star["metallicity"]))
+            bodies.extend(
+                _make_moons(
+                    rng, body, au, snow, star["metallicity"], star_mass_kg=star_mass_kg
+                )
+            )
 
         # Asteroid belt near snow line (or between rock and gas)
         rocks_au = [b.semi_major_m / AU_M for b in bodies if b.planet_class == "rocky"]
@@ -658,71 +667,116 @@ def _make_planet(
     )
 
 
-def _nested_moon_radii_Rp(rng: random.Random, planet: Body, n: int) -> List[float]:
+def _moon_mass_kg(rng: random.Random, planet: Body) -> float:
+    if planet.planet_class in ("gas_giant", "ice_giant"):
+        return rng.uniform(5e20, 1.5e23)
+    return rng.uniform(1e19, 7e22)
+
+
+def _pack_moon_semi_majors_m(
+    rng: random.Random,
+    planet: Body,
+    star_mass_kg: float,
+    n: int,
+) -> List[float]:
     """
-    Semi-major axes in planetary radii from Kepler + Laplace-style resonance.
+    Place n moons with general orbital-mechanics constraints (everywhere):
 
-    Jupiter's Io–Europa–Ganymede: mean motions 4:2:1 ⇒ periods 1:2:4.
-    Kepler III: a ∝ P^{2/3}, so a ratios = 1 : 2^{2/3} : 4^{2/3} ≈ 1 : 1.587 : 2.520
-    (Io ~5.9 R♃ → Europa ~9.4, Ganymede ~15). Callisto sits outside that chain.
+    1. Outside Roche limit (not torn apart)
+    2. Inside a fraction of the planet's Hill sphere (bound to the planet, not the star)
+    3. Mutually separated by ≳ K mutual Hill radii (no shared/co-orbital orbits)
+    4. Periods always implied by Kepler about the *planet* (not special-cased chains)
 
-    Never co-orbital: each moon gets its own a from the period ladder.
+    No Jupiter/Saturn templates — those systems are *examples* of these rules.
     """
     if n <= 0:
         return []
 
-    if planet.planet_class == "gas_giant":
-        # Innermost major moon near Io-class (with light jitter)
-        a0 = 5.9 * rng.uniform(0.95, 1.08)
-        # Period multipliers relative to innermost: 1, 2, 4, then Callisto-ish ~9.4, then outer
-        period_mult = [1.0, 2.0, 4.0, 9.4, 18.0, 32.0]
-    elif planet.planet_class == "ice_giant":
-        # Tighter packed ice-giant majors; still resonant chain
-        a0 = 5.0 * rng.uniform(0.95, 1.08)
-        period_mult = [1.0, 2.0, 4.0, 8.0, 16.0]
-    else:
-        # Rocky: not a Laplace chain — wide single/double companion
-        a0 = 40.0 * rng.uniform(0.9, 1.15)
-        period_mult = [1.0, 2.8, 6.0]
+    a_planet = planet.semi_major_m
+    r_h = hill_radius(a_planet, planet.mass_kg, star_mass_kg)
+    # Stable prograde moons typically well inside ~0.5 R_H; use 0.4 as outer cap
+    a_max = 0.40 * r_h
 
-    mults: List[float] = []
+    rho_p = density_sphere(planet.mass_kg, planet.radius_m)
+    # Assume icy/rocky moon density ~1500–3500
+    rho_m = 2000.0 if planet.planet_class != "rocky" else 3000.0
+    # Clear of rings/Roche; real regular moons sit at several planetary radii
+    a_min = max(
+        3.5 * planet.radius_m,
+        roche_limit_rigid(planet.radius_m, rho_p, rho_m) * 1.4,
+    )
+
+    if a_max <= a_min * 1.5:
+        # Tiny Hill sphere (close-in planet) — at most one moon if any room
+        if a_max > a_min * 1.1:
+            return [0.5 * (a_min + a_max)]
+        return []
+
+    # Provisional masses for mutual Hill packing (same order as final moons)
+    masses = [_moon_mass_kg(rng, planet) for _ in range(n)]
+    mu_p = G * planet.mass_kg
+
+    # Pack from the inside out
+    smas: List[float] = []
+    # K ~ 8–12 mutual Hill radii between adjacent circular moons
+    k_hill = rng.uniform(8.0, 12.0)
+
+    a = a_min * rng.uniform(1.0, 1.15)
     for i in range(n):
-        p_ratio = period_mult[i] if i < len(period_mult) else period_mult[-1] * (2.0 ** (i - len(period_mult) + 1))
-        # a / a0 = (P / P0)^{2/3}
-        a_rp = a0 * (p_ratio ** (2.0 / 3.0))
-        # Tiny independent jitter on phase of formation, not enough to break nesting
-        a_rp *= rng.uniform(0.98, 1.02)
-        if mults and a_rp <= mults[-1] * 1.15:
-            a_rp = mults[-1] * 1.2
-        mults.append(a_rp)
-    return mults
+        if a > a_max:
+            break
+        smas.append(a)
+        if i + 1 >= n:
+            break
+        # Minimum Δa from mutual Hill with next moon (estimate next mass)
+        m1, m2 = masses[i], masses[i + 1]
+        # Iterate once: R_Hm depends on a_bar
+        rh_m = mutual_hill_radius(a, a * 1.3, m1, m2, planet.mass_kg)
+        da = k_hill * rh_m
+        # Also prefer period ratio ≳ 1.3 via Kepler (a2/a1 ≳ 1.3^{2/3})
+        a_from_period = a * (1.35 ** (2.0 / 3.0))
+        a_next = max(a + da, a_from_period)
+        a_next *= rng.uniform(1.0, 1.08)
+        a = a_next
+
+    # If we couldn't fit n, return what fit (caller may use fewer)
+    # Ensure strictly increasing (never co-orbital)
+    cleaned: List[float] = []
+    for a in smas:
+        if cleaned and a <= cleaned[-1] * 1.12:
+            a = cleaned[-1] * 1.15
+        if a > a_max:
+            break
+        cleaned.append(a)
+    return cleaned
 
 
 def _make_moons(
-    rng: random.Random, planet: Body, au: float, snow: float, star_metallicity: float = 1.0
+    rng: random.Random,
+    planet: Body,
+    au: float,
+    snow: float,
+    star_metallicity: float = 1.0,
+    star_mass_kg: float = SOLAR_MASS,
 ) -> List[Body]:
     moons: List[Body] = []
+    # How many we *attempt* — Hill packing decides how many actually fit
     if planet.planet_class == "gas_giant":
-        n = rng.randint(3, 5)
+        n_try = rng.randint(3, 6)
     elif planet.planet_class == "ice_giant":
-        n = rng.randint(2, 4)
+        n_try = rng.randint(2, 5)
     elif planet.mass_kg > 0.7 * EARTH_MASS:
-        n = rng.randint(0, 2)
+        n_try = rng.randint(0, 2)
     else:
-        n = 1 if rng.random() < 0.35 else 0
+        n_try = 1 if rng.random() < 0.35 else 0
 
-    r_mults = _nested_moon_radii_Rp(rng, planet, n)
-    for m, r_mult in enumerate(r_mults):
-        sma = r_mult * planet.radius_m
-        # Mass: major icy moons vs small rocky companions
-        if planet.planet_class in ("gas_giant", "ice_giant"):
-            m_mass = rng.uniform(2e21, 1.5e23)  # Europa–Ganymede class scale
-        else:
-            m_mass = rng.uniform(1e19, 8e22)
+    smas = _pack_moon_semi_majors_m(rng, planet, star_mass_kg, n_try)
+    for m, sma in enumerate(smas):
+        m_mass = _moon_mass_kg(rng, planet)
         m_radius = max(1.5e5, EARTH_RADIUS * (m_mass / EARTH_MASS) ** 0.3 * 0.2)
         moon_ice = au > snow * 0.75 or planet.planet_class != "rocky" or rng.random() < 0.35
         moon_metal = rng.random() < 0.3
-        roman = ["I", "II", "III", "IV", "V", "VI"][m]
+        roman = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"][m]
         moons.append(
             Body(
                 id=f"{planet.id}_m{m}",

@@ -28,8 +28,56 @@ class TransferOption:
 
 
 def period_seconds(semi_major_m: float, mu: float) -> float:
-    """Orbital period from Kepler's third law."""
+    """Orbital period from Kepler's third law: P = 2π √(a³/μ)."""
     return 2.0 * math.pi * math.sqrt(semi_major_m**3 / mu)
+
+
+def semi_major_from_period(period_s: float, mu: float) -> float:
+    """Invert Kepler III: a = (μ P² / 4π²)^{1/3}."""
+    return (mu * period_s**2 / (4.0 * math.pi**2)) ** (1.0 / 3.0)
+
+
+def hill_radius(a_m: float, m_secondary: float, m_primary: float) -> float:
+    """
+    Approximate Hill sphere radius of a secondary orbiting a primary on a circular orbit.
+    R_H ≈ a (m / (3 M))^{1/3}
+    """
+    if m_primary <= 0 or a_m <= 0 or m_secondary <= 0:
+        return 0.0
+    return a_m * (m_secondary / (3.0 * m_primary)) ** (1.0 / 3.0)
+
+
+def roche_limit_rigid(radius_primary: float, density_primary: float, density_secondary: float) -> float:
+    """
+    Rigid-body Roche limit (center of secondary): R_roche ≈ R_p * (2 ρ_p / ρ_s)^{1/3}
+    Densities in same units (e.g. kg/m³).
+    """
+    if density_secondary <= 0:
+        return 2.44 * radius_primary
+    return radius_primary * (2.0 * density_primary / density_secondary) ** (1.0 / 3.0)
+
+
+def mutual_hill_radius(a1: float, a2: float, m1: float, m2: float, m_central: float) -> float:
+    """Mutual Hill radius of two coplanar secondaries about the same central mass."""
+    a_bar = 0.5 * (a1 + a2)
+    return a_bar * ((m1 + m2) / (3.0 * m_central)) ** (1.0 / 3.0)
+
+
+def min_period_ratio_for_stability(k_hill: float = 8.0) -> float:
+    """
+    Rough lower bound on adjacent period ratio for packed circular coplanar orbits.
+    Using Δa ≳ k R_H,mut and Kepler: not exact — used only as a generator floor.
+    k_hill ~ 7–10 is typical for long-term packed systems.
+    """
+    # For equal-mass moons, R_H/a ~ (2m/(3M))^{1/3}; we enforce via placement instead.
+    return 1.0  # placeholder — packing enforced in meters via mutual Hill
+
+
+def density_sphere(mass_kg: float, radius_m: float) -> float:
+    if radius_m <= 0:
+        return 1000.0
+    vol = (4.0 / 3.0) * math.pi * radius_m**3
+    return mass_kg / vol
 
 
 def circular_velocity(r_m: float, mu: float) -> float:
