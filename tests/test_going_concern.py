@@ -112,8 +112,17 @@ def test_directed_search_can_exhaust_missing_resource():
             break
         g.warp_to_next_event()
     sat = next(u for u in g.fleet.values() if u.kind == "survey")
-    # Gas giant: no Fe deposit — search should conclude none
-    body = next(b for b in g.system.bodies if b.planet_class == "gas_giant")
+    # Body with no Fe deposit — directed search should conclude none
+    body = next(
+        (
+            b
+            for b in g.system.bodies
+            if b.kind in ("planet", "moon", "asteroid")
+            and not any(d.resource == "Fe" for d in b.deposits)
+        ),
+        None,
+    )
+    assert body is not None, "need a body without Fe for this test"
     sat.location_id = body.id
     g.issue_order(sat.id, "survey", body.id, resource="Fe")
     for _ in range(10):
