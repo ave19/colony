@@ -563,6 +563,28 @@ def test_haul_from_mass_driver_cheaper_than_chemical():
     assert opts_rail[0].get("mass_driver_ascent") is True
 
 
+def test_survey_same_body_no_dv_burn_different_body_spends():
+    g = Game(universe_seed=8)
+    _arrive(g)
+    g.queue_build("survey")
+    while not any(u.kind == "survey" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    sat = next(u for u in g.fleet.values() if u.kind == "survey")
+    home = sat.location_id
+    cap = sat.dv_remaining_m_s
+    # Survey home world: already there → work immediately, no Δv
+    g.issue_order(sat.id, "survey", home, resource="Fe")
+    assert sat.status == "working"
+    assert sat.dv_remaining_m_s == cap
+    g.issue_order(sat.id, "idle")
+    # Survey another planet → must burn Δv
+    dest = next(b for b in g.system.bodies if b.kind == "planet" and b.id != home)
+    g.issue_order(sat.id, "survey", dest.id, resource="Fe")
+    assert sat.status == "en_route"
+    assert sat.dv_remaining_m_s < cap
+    assert sat.dv_remaining_m_s == cap - g._travel_dv_m_s(home, dest.id, "survey")
+
+
 def test_rename_unit():
     g = Game(universe_seed=70)
     _arrive(g)

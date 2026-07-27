@@ -1583,6 +1583,9 @@ class Game:
             return self.home_body_id or location_id
         return location_id
 
+    def _same_location(self, a: str, b: str) -> bool:
+        return self._resolve_location_id(a) == self._resolve_location_id(b)
+
     def _travel_dv_m_s(self, from_id: str, to_id: str, unit_kind: str = "survey") -> float:
         """
         Δv cost (m/s) for a unit hop. Survey probes are low-thrust ion → higher budget burn
@@ -1949,30 +1952,32 @@ class Game:
                 # still allow if deposit exists (player may have prior intel)
                 if not any(d.resource == res for d in body.deposits):
                     raise ValueError(f"not a useful search target here: {res}")
-            travel = self._travel_months(u.location_id, target_id, u.kind)
-            dv = self._travel_dv_m_s(u.location_id, target_id, u.kind)
             u.order = "survey"
             u.target_id = target_id
             u.search_resource = res
             goal = f"sources of {RESOURCE_NAMES.get(res, res)}" if res else "broad composition"
-            if u.location_id == target_id and travel < 0.05:
-                # Already on station — no transit / no Δv
+            # Already at this body (e.g. ark home world) — start work, no transit, no Δv
+            if self._same_location(u.location_id, target_id):
+                u.location_id = target_id
                 u.status = "working"
                 u.months_left = 0.0
                 self._log(
                     "order",
-                    f"{u.name} begins search for {goal} on {body.name}. "
-                    f"Stays until recalled. Δv {u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f} m/s.",
+                    f"{u.name} begins search for {goal} on {body.name} "
+                    f"(already on station — 0 m/s Δv). "
+                    f"Tanks {u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f} m/s.",
                 )
             else:
+                travel = self._travel_months(u.location_id, target_id, u.kind)
+                dv = self._travel_dv_m_s(u.location_id, target_id, u.kind)
                 self._spend_dv(u, dv, f"transit to {body.name}")
                 u.status = "en_route"
                 u.months_left = max(travel, 0.05)
                 self._log(
                     "order",
                     f"{u.name} → {body.name} to find {goal}: "
-                    f"{u.months_left:.2f} mo, Δv {dv:.0f} m/s "
-                    f"(remaining {u.dv_remaining_m_s:.0f}).",
+                    f"{u.months_left:.2f} mo transit, burned {dv:.0f} m/s Δv "
+                    f"(remaining {u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f}).",
                 )
             return self.snapshot()
 
@@ -1987,36 +1992,60 @@ class Game:
                     "then mine that site (not the whole world)"
                 )
             body = self.system.body_by_id(msite.body_id)
-            travel = self._travel_months(u.location_id, msite.body_id, u.kind)
-            dv = self._travel_dv_m_s(u.location_id, msite.body_id, u.kind)
-            self._spend_dv(u, dv, f"transit to mine {msite.name}")
             work = 1.5
             u.order = "mine"
             u.target_id = msite.id  # site id
-            u.status = "en_route"
-            u.months_left = travel + work
-            self._log(
-                "order",
-                f"{u.name} → mine {msite.name} on {body.name if body else msite.body_id}: "
-                f"{travel:.1f} mo transit + {work:.1f} mo shift, Δv {dv:.0f} m/s.",
-            )
+            if self._same_location(u.location_id, msite.body_id):
+                # Already on body — mining shift only, no transit Δv
+                u.location_id = msite.body_id
+                u.status = "en_route"  # uses months_left countdown to complete shift
+                u.months_left = work
+                self._log(
+                    "order",
+                    f"{u.name} starts mining shift at {msite.name} on "
+                    f"{body.name if body else msite.body_id} "
+                    f"({work:.1f} mo, already on body — 0 m/s Δv).",
+                )
+            else:
+                travel = self._travel_months(u.location_id, msite.body_id, u.kind)
+                dv = self._travel_dv_m_s(u.location_id, msite.body_id, u.kind)
+                self._spend_dv(u, dv, f"transit to mine {msite.name}")
+                u.status = "en_route"
+                u.months_left = travel + work
+                self._log(
+                    "order",
+                    f"{u.name} → mine {msite.name} on {body.name if body else msite.body_id}: "
+                    f"{travel:.1f} mo transit + {work:.1f} mo shift, "
+                    f"burned {dv:.0f} m/s Δv (remaining {u.dv_remaining_m_s:.0f}).",
+                )
             return self.snapshot()
 
         if order == "move":
             body = self.system.body_by_id(target_id)
             if not body:
                 raise ValueError("pick a destination")
+            if self._same_location(u.location_id, target_id):
+                u.location_id = target_id
+                u.status = "idle"
+                u.order = ""
+                u.target_id = ""
+                u.months_left = 0.0
+                self._log(
+                    "order",
+                    f"{u.name} already at {body.name} — 0 m/s Δv.",
+                )
+                return self.snapshot()
             travel = self._travel_months(u.location_id, target_id, u.kind)
             dv = self._travel_dv_m_s(u.location_id, target_id, u.kind)
             self._spend_dv(u, dv, f"move to {body.name}")
             u.order = "move"
             u.target_id = target_id
             u.status = "en_route"
-            u.months_left = max(0.75, travel) if travel >= 0.05 else max(0.1, travel)
+            u.months_left = max(0.75, travel)
             self._log(
                 "order",
                 f"{u.name} → {body.name}: {u.months_left:.1f} mo, "
-                f"Δv {dv:.0f} m/s (remaining {u.dv_remaining_m_s:.0f}).",
+                f"burned {dv:.0f} m/s Δv (remaining {u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f}).",
             )
             return self.snapshot()
 
