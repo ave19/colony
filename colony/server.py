@@ -58,7 +58,7 @@ class StartHaulBody(BaseModel):
 
 class OrderBody(BaseModel):
     unit_id: str
-    order: str  # survey | mine | move | idle
+    order: str  # survey | mine | move | idle | return_ark | refuel
     target_id: str = ""
     resource: str = ""  # for survey: "Fe" = find sources of iron
 
@@ -87,13 +87,14 @@ def open_archive():
 
 
 class BuildBody(BaseModel):
-    unit_kind: str  # survey | miner | hauler
+    unit_kind: str  # survey | miner | hauler | refuel_depot | …
+    deploy_body_id: str = ""  # required for structures (depot deploy target)
 
 
 @app.post("/api/build")
 def build_unit(body: BuildBody):
     try:
-        return room().queue_build(body.unit_kind)
+        return room().queue_build(body.unit_kind, deploy_body_id=body.deploy_body_id or "")
     except Exception as e:
         raise HTTPException(400, str(e)) from e
 

@@ -297,6 +297,89 @@ def test_ark_trickle_makes_propellant():
     assert g.ark_stock["chem_prop"] > prop0
 
 
+def test_survey_probe_has_dv_budget_and_return_ark_refuels():
+    g = Game(universe_seed=60)
+    _arrive(g)
+    g.queue_build("survey")
+    while not any(u.kind == "survey" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    sat = next(u for u in g.fleet.values() if u.kind == "survey")
+    assert sat.dv_capacity_m_s >= 4000
+    assert sat.dv_remaining_m_s == sat.dv_capacity_m_s
+
+    dest = next(b for b in g.system.bodies if b.kind == "planet" and b.id != g.home_body_id)
+    est = g.estimate_order(sat.id, "move", dest.id)
+    assert est["dv_m_s"] > 0
+    assert est["can_afford_dv"] is True
+
+    g.issue_order(sat.id, "move", dest.id)
+    assert sat.dv_remaining_m_s < sat.dv_capacity_m_s
+    burned = sat.dv_capacity_m_s - sat.dv_remaining_m_s
+    assert burned > 0
+    while sat.status == "en_route":
+        g.warp_to_next_event(force=True)
+    assert sat.location_id == dest.id
+
+    # Drain tanks artificially then return home
+    sat.dv_remaining_m_s = min(sat.dv_remaining_m_s, 50.0)
+    # May not afford long return — top up just enough for test path
+    need = g._travel_dv_m_s(sat.location_id, g.home_body_id, "survey")
+    sat.dv_remaining_m_s = need + 10
+    g.issue_order(sat.id, "return_ark")
+    assert sat.order == "return_ark"
+    while sat.status == "en_route":
+        g.warp_to_next_event(force=True)
+    assert sat.location_id == g.home_body_id
+    assert sat.dv_remaining_m_s == sat.dv_capacity_m_s  # refilled
+
+
+def test_insufficient_dv_blocks_move():
+    g = Game(universe_seed=61)
+    _arrive(g)
+    g.queue_build("survey")
+    while not any(u.kind == "survey" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    sat = next(u for u in g.fleet.values() if u.kind == "survey")
+    dest = next(b for b in g.system.bodies if b.kind == "planet" and b.id != g.home_body_id)
+    sat.dv_remaining_m_s = 1.0  # basically dry
+    try:
+        g.issue_order(sat.id, "move", dest.id)
+        assert False, "should block"
+    except ValueError as e:
+        assert "Δv" in str(e) or "dv" in str(e).lower() or "m/s" in str(e)
+
+
+def test_build_refuel_depot_and_refuel_there():
+    g = Game(universe_seed=62)
+    _arrive(g)
+    # Seed enough materials
+    g.ark_stock["steel"] = max(g.ark_stock.get("steel", 0), 100)
+    g.ark_stock["chip"] = max(g.ark_stock.get("chip", 0), 20)
+    g.ark_stock["chem_prop"] = max(g.ark_stock.get("chem_prop", 0), 80)
+    g.ark_stock["Al"] = max(g.ark_stock.get("Al", 0), 40)
+    body = next(b for b in g.system.bodies if b.kind == "planet" and b.id != g.home_body_id)
+    g.queue_build("refuel_depot", deploy_body_id=body.id)
+    assert any(j.building_id == "refuel_depot" for j in g.build_queue)
+    for _ in range(30):
+        site = g.sites.get(body.id)
+        if site and "refuel_depot" in site.buildings:
+            break
+        g.warp_to_next_event(force=True)
+    site = g.sites[body.id]
+    assert "refuel_depot" in site.buildings
+    assert site.stockpile.get("chem_prop", 0) > 0
+
+    g.queue_build("survey")
+    while not any(u.kind == "survey" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    sat = next(u for u in g.fleet.values() if u.kind == "survey")
+    # Place sat at depot body with low tanks
+    sat.location_id = body.id
+    sat.dv_remaining_m_s = 100.0
+    g.issue_order(sat.id, "refuel")
+    assert sat.dv_remaining_m_s > 100.0
+
+
 def test_mine_then_haul_ore_to_ark():
     g = Game(universe_seed=22)
     _arrive(g)

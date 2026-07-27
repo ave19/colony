@@ -242,6 +242,24 @@ function resName(id) {
   return ((state.tech && state.tech.resources) || {})[id] || id;
 }
 
+function formatDv(m_s) {
+  if (m_s == null || !Number.isFinite(Number(m_s))) return "—";
+  const n = Number(m_s);
+  if (n >= 1000) return `${(n / 1000).toFixed(2)} km/s`;
+  return `${Math.round(n)} m/s`;
+}
+
+function dvBarHtml(u) {
+  if (!u || !(u.dv_capacity_m_s > 0)) return "";
+  const frac = Math.max(0, Math.min(1, (u.dv_remaining_m_s || 0) / u.dv_capacity_m_s));
+  const pct = (frac * 100).toFixed(0);
+  const low = frac < 0.25 ? "dv-low" : frac < 0.5 ? "dv-mid" : "dv-ok";
+  return `<div class="dv-meter ${low}">
+    <div class="dv-label">Δv remaining <strong>${formatDv(u.dv_remaining_m_s)}</strong> / ${formatDv(u.dv_capacity_m_s)} (${pct}%)</div>
+    <div class="queue-bar"><i style="width:${pct}%"></i></div>
+  </div>`;
+}
+
 function selectBody(id, { focus = true, openRight = true } = {}) {
   selectedBodyId = id;
   if (openRight) $("panel-right").classList.remove("collapsed");
@@ -448,9 +466,13 @@ function renderSurveyCascade(root, u) {
     mission = `On station @ ${locName} · ${what} · ${Number(sm).toFixed(1)} mo`;
   }
 
+  const dvLine =
+    u.dv_capacity_m_s > 0
+      ? ` · Δv ${formatDv(u.dv_remaining_m_s)} / ${formatDv(u.dv_capacity_m_s)}`
+      : "";
   $("cascade-kicker").textContent = "Survey probe · action card";
   $("cascade-title").textContent = u.name;
-  $("cascade-sub").textContent = mission;
+  $("cascade-sub").textContent = mission + dvLine;
 
   const tabs = [
     { id: "actions", label: "Actions" },
@@ -485,11 +507,19 @@ function surveyCascadeActionsHtml(u, loc, mission, busy) {
     : u.order === "survey"
       ? "Broad composition"
       : "—";
+  const home = state.home_body_id;
+  const atHome = home && u.location_id === home;
+  const siteBld = (loc && loc.site_buildings) || [];
+  const atDepot = siteBld.includes("refuel_depot");
+  const canRefuelHere = atHome || atDepot;
+  const tanksLow = u.dv_capacity_m_s > 0 && u.dv_remaining_m_s < u.dv_capacity_m_s * 0.99;
+
   return `
     <p class="cascade-section-lead">
-      Apply this probe’s sensors to a body: move there, set what to hunt for, and warp for progress.
-      Survey continues on-station until you stand by.
+      Probes carry a <strong>fixed Δv budget</strong> (ion tanks). Every hop spends it.
+      Return to the ark (or a refueling depot) to top off.
     </p>
+    ${dvBarHtml(u)}
     <div class="card cascade-mission">
       <h3>Current mission</h3>
       <p>${mission}</p>
@@ -498,7 +528,7 @@ function surveyCascadeActionsHtml(u, loc, mission, busy) {
     <div class="action-stack">
       <button type="button" class="action-card" data-goto="move">
         <span class="action-title">Move to a new location</span>
-        <span class="action-desc">Transit to a planet, moon, or asteroid (real transfer time).</span>
+        <span class="action-desc">Transit costs time and Δv. Estimate shown before you commit.</span>
       </button>
       <button type="button" class="action-card" data-goto="survey">
         <span class="action-title">Change survey priorities</span>
@@ -508,7 +538,23 @@ function surveyCascadeActionsHtml(u, loc, mission, busy) {
         loc
           ? `<button type="button" class="action-card primary-action" data-quick-survey="${loc.id}" ${busy && !(u.status === "working" && u.order === "survey" && u.location_id === loc.id) ? "disabled" : ""}>
         <span class="action-title">Survey here · ${loc.name}</span>
-        <span class="action-desc">Broad composition on current body (or re-task after stand by).</span>
+        <span class="action-desc">Broad composition on current body (no Δv if already on station).</span>
+      </button>`
+          : ""
+      }
+      <button type="button" class="action-card primary-action" data-return-ark="1" ${busy ? "disabled" : ""}>
+        <span class="action-title">Return to ark</span>
+        <span class="action-desc">${
+          atHome
+            ? "Already at ark — tops off tanks immediately."
+            : "Transit home and fully refuel Δv tanks on arrival."
+        }</span>
+      </button>
+      ${
+        canRefuelHere && tanksLow
+          ? `<button type="button" class="action-card" data-refuel="1" ${busy ? "disabled" : ""}>
+        <span class="action-title">Refuel here</span>
+        <span class="action-desc">${atHome ? "Ark stores — free full refill." : "Depot chem_prop → Δv."}</span>
       </button>`
           : ""
       }
@@ -524,8 +570,10 @@ function surveyCascadeMoveHtml(u, loc) {
   const destDefault = selectedBodyId || u.location_id || "";
   return `
     <p class="cascade-section-lead">
-      Choose a destination. Travel uses orbital transfer times (not teleport). After arrival the probe waits idle until you set a survey focus.
+      Choose a destination. Travel uses orbital transfer times and burns onboard Δv.
+      If tanks run dry mid-plan, return to the ark or a depot first.
     </p>
+    ${dvBarHtml(u)}
     <div class="card">
       <label>Destination body
         <select id="sv-move-dest">${bodyPickerOptions(destDefault)}</select>
@@ -619,6 +667,31 @@ function bindSurveyCascade(bodyEl, u, tab) {
     };
   }
 
+  const retBtn = bodyEl.querySelector("[data-return-ark]");
+  if (retBtn) {
+    retBtn.onclick = async () => {
+      try {
+        if (unitIsBusy(u)) await issueUnitOrder(u.id, "idle");
+        await issueUnitOrder(u.id, "return_ark");
+        reOpen("actions");
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 320));
+      }
+    };
+  }
+
+  const refuelBtn = bodyEl.querySelector("[data-refuel]");
+  if (refuelBtn) {
+    refuelBtn.onclick = async () => {
+      try {
+        await issueUnitOrder(u.id, "refuel");
+        reOpen("actions");
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 280));
+      }
+    };
+  }
+
   const quick = bodyEl.querySelector("[data-quick-survey]");
   if (quick) {
     quick.onclick = async () => {
@@ -650,13 +723,24 @@ function bindSurveyCascade(bodyEl, u, tab) {
             target_id: destSel.value,
           }),
         });
+        let time = "";
         if (est.years >= 0.5) {
-          estEl.textContent = `Transit ~${est.years.toFixed(2)} years (${est.months.toFixed(1)} mo)`;
+          time = `~${est.years.toFixed(2)} y (${est.months.toFixed(1)} mo)`;
         } else if (est.months >= 1) {
-          estEl.textContent = `Transit ~${est.months.toFixed(1)} months`;
+          time = `~${est.months.toFixed(1)} mo`;
         } else {
-          estEl.textContent = `Transit ~${Math.max(1, Math.round(est.months * 30))} days`;
+          time = `~${Math.max(1, Math.round(est.months * 30))} d`;
         }
+        const dv = est.dv_m_s != null ? formatDv(est.dv_m_s) : "—";
+        const after =
+          est.dv_after_m_s != null ? ` → ${formatDv(est.dv_after_m_s)} left` : "";
+        const ok = est.can_afford_dv !== false;
+        estEl.innerHTML = ok
+          ? `Transit ${time} · burns <strong>${dv}</strong> Δv${after}`
+          : `<span style="color:#e88">Need ${dv} Δv — only ${formatDv(
+              est.dv_remaining_m_s
+            )} left. Return to ark or depot.</span>`;
+        if (go) go.disabled = !ok;
       } catch (_) {
         estEl.textContent = "Could not estimate transit.";
       }
@@ -673,7 +757,7 @@ function bindSurveyCascade(bodyEl, u, tab) {
           selectedBodyId = destSel.value;
           reOpen("actions");
         } catch (e) {
-          alert(String(e.message || e).slice(0, 280));
+          alert(String(e.message || e).slice(0, 320));
         }
       };
     }
@@ -830,9 +914,12 @@ function arkCascadeFabHtml() {
         const total = j.months_total || 1;
         const left = Math.max(0, j.months_left || 0);
         const done = Math.min(100, ((total - left) / total) * 100);
+        const deploy = j.deploy_body_id
+          ? ` · deploy @ ${bodyById(j.deploy_body_id)?.name || j.deploy_body_id}`
+          : "";
         return `<div class="queue-job">
           <div class="title">${j.name}</div>
-          <div class="meta">In bay · ${left.toFixed(1)} mo remaining of ${total.toFixed(1)} mo · warp to advance</div>
+          <div class="meta">In bay · ${left.toFixed(1)} mo of ${total.toFixed(1)} mo${deploy} · warp to advance</div>
           <div class="queue-bar"><i style="width:${done.toFixed(1)}%"></i></div>
         </div>`;
       })
@@ -844,22 +931,51 @@ function arkCascadeFabHtml() {
       const cost = Object.entries(s.cost || {})
         .map(([k, v]) => `${v} t ${k}`)
         .join(", ");
+      const dv =
+        s.dv_capacity_m_s > 0
+          ? ` · Δv tank ${formatDv(s.dv_capacity_m_s)}`
+          : "";
       return `<div class="card">
         <h3>${s.name}</h3>
         <p>${s.description || ""}</p>
-        <p class="muted">${cost} · ${s.months} mo in bay</p>
+        <p class="muted">${cost} · ${s.months} mo in bay${dv}</p>
         <button type="button" class="primary" data-build="${s.id}">Queue on ark</button>
       </div>`;
     })
     .join("");
+
+  const structs = state.structure_builds || {};
+  const structCards = Object.values(structs)
+    .map((s) => {
+      const cost = Object.entries(s.cost || {})
+        .map(([k, v]) => `${v} t ${k}`)
+        .join(", ");
+      return `<div class="card">
+        <h3>${s.name}</h3>
+        <p>${s.description || ""}</p>
+        <p class="muted">${cost} · ${s.months} mo · deploys to a body</p>
+        <label>Deploy on
+          <select data-struct-dest="${s.id}">${bodyPickerOptions(
+            selectedBodyId || state.home_body_id || ""
+          )}</select>
+        </label>
+        <button type="button" class="primary" data-struct="${s.id}" style="margin-top:8px;width:100%">
+          Queue depot
+        </button>
+      </div>`;
+    })
+    .join("");
+
   return `
     <p class="cascade-section-lead">
-      Materials-only arrival: you authorize builds; the bay spends stock and time. Units appear in the fleet when complete.
+      Materials-only arrival: authorize fleet units (with fixed Δv tanks) or site structures like refueling depots.
     </p>
     <h2>Bay queue</h2>
     <div class="queue-list">${queueHtml}</div>
-    <h2>Authorize construction</h2>
+    <h2>Fleet units</h2>
     <div class="cascade-grid">${cards}</div>
+    <h2>Site structures</h2>
+    <div class="cascade-grid">${structCards || '<p class="empty">None</p>'}</div>
   `;
 }
 
@@ -952,6 +1068,24 @@ function bindArkCascade(body, tab) {
           render();
         } catch (e) {
           alert(String(e.message || e).slice(0, 280));
+        }
+      };
+    });
+    body.querySelectorAll("[data-struct]").forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          const sid = btn.dataset.struct;
+          const sel = body.querySelector(`[data-struct-dest="${sid}"]`);
+          const deploy = sel ? sel.value : state.home_body_id || "";
+          selectedUnitId = "ark";
+          state = await api("/api/build", {
+            method: "POST",
+            body: JSON.stringify({ unit_kind: sid, deploy_body_id: deploy }),
+          });
+          cascade = { kind: "ark", tab: "fab" };
+          render();
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 320));
         }
       };
     });
@@ -1117,8 +1251,9 @@ function renderUnitPanel() {
     el.className = "card";
     const loc = bodyById(u.location_id);
     el.innerHTML = `<h3>${u.name}</h3>
-      <p class="muted">Survey probe · move, focus, stand by</p>
+      <p class="muted">Survey probe · fixed Δv tanks</p>
       <p>@ ${loc ? loc.name : u.location_id} · ${u.status}${u.order ? " / " + u.order : ""}</p>
+      ${dvBarHtml(u)}
       <button type="button" class="primary open-cascade-btn" id="btn-open-survey">
         Open probe actions
       </button>`;

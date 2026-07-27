@@ -22,6 +22,7 @@ from .tech import (
     POWER_OPTIONS,
     RECIPES,
     RESOURCE_NAMES,
+    STRUCTURE_BUILDS,
     UNIT_BUILDS,
     expand_base_plan,
     tech_book_summary,
@@ -146,6 +147,9 @@ class FleetUnit:
     search_resource: str = ""  # directed survey: "Fe", "H2O", …
     months_left: float = 0.0
     capabilities: List[str] = field(default_factory=list)
+    # Fixed propellant budget (m/s). 0 capacity = unlimited (ark command node).
+    dv_capacity_m_s: float = 0.0
+    dv_remaining_m_s: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -159,6 +163,13 @@ class FleetUnit:
             "search_resource": self.search_resource,
             "months_left": round(self.months_left, 2),
             "capabilities": self.capabilities,
+            "dv_capacity_m_s": round(self.dv_capacity_m_s, 1),
+            "dv_remaining_m_s": round(self.dv_remaining_m_s, 1),
+            "dv_fraction": (
+                round(self.dv_remaining_m_s / self.dv_capacity_m_s, 3)
+                if self.dv_capacity_m_s > 0
+                else None
+            ),
         }
 
 
@@ -166,12 +177,16 @@ class FleetUnit:
 class BuildJob:
     """Ark fabrication job — materials already reserved from stock."""
     id: str
-    unit_kind: str
+    unit_kind: str  # survey|miner|hauler|structure kinds
     name: str
     months_total: float
     months_left: float
-    capabilities: List[str]
+    capabilities: List[str] = field(default_factory=list)
     status: str = "building"  # building | complete
+    # Structure deploy target (body id); empty for fleet units
+    deploy_body_id: str = ""
+    building_id: str = ""  # BUILDINGS key for structures
+    dv_capacity_m_s: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -182,6 +197,8 @@ class BuildJob:
             "months_left": round(self.months_left, 2),
             "capabilities": self.capabilities,
             "status": self.status,
+            "deploy_body_id": self.deploy_body_id,
+            "building_id": self.building_id,
         }
 
 
@@ -541,48 +558,102 @@ class Game:
         home = self.home_body_id or (
             self.sites.get("ark_orbit").body_id if self.sites.get("ark_orbit") else "p0"
         )
+        # Structure deploy
+        if job.building_id:
+            body_id = job.deploy_body_id or home
+            site = self.sites.setdefault(body_id, Site(body_id=body_id))
+            if job.building_id not in site.buildings:
+                site.buildings.append(job.building_id)
+            # Seed propellant stock for depots
+            if job.building_id == "refuel_depot":
+                site.stockpile["chem_prop"] = site.stockpile.get("chem_prop", 0.0) + 25.0
+            body = self.system.body_by_id(body_id) if self.system else None
+            where = body.name if body else body_id
+            self._log(
+                "build",
+                f"Deployed {job.name} at {where}."
+                + (
+                    " Units can refuel Δv here."
+                    if job.building_id == "refuel_depot"
+                    else ""
+                ),
+            )
+            return
+
         self._unit_seq[job.unit_kind] = self._unit_seq.get(job.unit_kind, 0) + 1
         n = self._unit_seq[job.unit_kind]
         uid = f"{job.unit_kind[0:2]}{n}"
         name = f"{job.name} {n}"
+        cap = float(job.dv_capacity_m_s or 0.0)
         self.fleet[uid] = FleetUnit(
             id=uid,
             name=name,
             kind=job.unit_kind,
             location_id=home,
             capabilities=list(job.capabilities),
+            dv_capacity_m_s=cap,
+            dv_remaining_m_s=cap,  # full tanks on launch from ark
         )
-        self._log("build", f"Fabrication complete: {name} ready at ark.")
+        self._log(
+            "build",
+            f"Fabrication complete: {name} ready at ark"
+            + (f" (Δv {cap:.0f} m/s tanks full)." if cap > 0 else "."),
+        )
 
-    def queue_build(self, unit_kind: str) -> dict:
-        """Authorize ark to build a unit from seed materials + time."""
+    def queue_build(self, unit_kind: str, deploy_body_id: str = "") -> dict:
+        """Authorize ark to build a unit or structure from seed materials + time."""
         self.catch_up()
         if self.phase != "system":
             raise ValueError("can only build after arrival")
-        spec = UNIT_BUILDS.get(unit_kind)
-        if not spec:
-            raise ValueError(f"unknown unit type {unit_kind}")
-        # Must have ark present
         if not any(u.kind == "ark" for u in self.fleet.values()):
             raise ValueError("no ark")
+
+        unit_spec = UNIT_BUILDS.get(unit_kind)
+        struct_spec = STRUCTURE_BUILDS.get(unit_kind)
+        if unit_spec:
+            spec = unit_spec
+            is_structure = False
+        elif struct_spec:
+            spec = struct_spec
+            is_structure = True
+        else:
+            raise ValueError(f"unknown build type {unit_kind}")
+
+        if is_structure:
+            body_id = deploy_body_id or self.home_body_id
+            if not body_id or not self.system or not self.system.body_by_id(body_id):
+                raise ValueError("pick a body to deploy the structure on")
+            # One depot per body is enough for v1
+            site = self.sites.get(body_id)
+            if site and spec.get("building") in site.buildings:
+                raise ValueError("that body already has this structure")
+
         for res, need in spec["cost"].items():
             have = self.ark_stock.get(res, 0.0)
             if have + 1e-9 < need:
                 raise ValueError(f"need {need} t {res}, ark has {have:.1f}")
         for res, need in spec["cost"].items():
             self.ark_stock[res] = self.ark_stock.get(res, 0.0) - need
+
         job = BuildJob(
             id=_id(),
             unit_kind=spec["kind"],
             name=spec["name"],
             months_total=float(spec["months"]),
             months_left=float(spec["months"]),
-            capabilities=list(spec["capabilities"]),
+            capabilities=list(spec.get("capabilities") or []),
+            deploy_body_id=deploy_body_id or (self.home_body_id if is_structure else ""),
+            building_id=spec.get("building") or "",
+            dv_capacity_m_s=float(spec.get("dv_capacity_m_s") or 0.0),
         )
         self.build_queue.append(job)
+        where = ""
+        if is_structure and self.system:
+            b = self.system.body_by_id(job.deploy_body_id)
+            where = f" → {b.name}" if b else f" → {job.deploy_body_id}"
         self._log(
             "build",
-            f"Authorized build: {spec['name']} "
+            f"Authorized build: {spec['name']}{where} "
             f"({spec['months']} mo, materials reserved).",
         )
         return self.snapshot()
@@ -647,6 +718,9 @@ class Game:
                 elif u.order == "mine":
                     label = f"{u.name} arrives at extraction site on {dest_name}"
                     kind = "mine_arrival"
+                elif u.order == "return_ark":
+                    label = f"{u.name} returns to ark (refuel)"
+                    kind = "return_ark"
                 elif u.order == "move":
                     label = f"{u.name} arrives at {dest_name}"
                     kind = "arrival"
@@ -840,6 +914,59 @@ class Game:
             return parent.semi_major_m if parent else b.semi_major_m
         return b.semi_major_m
 
+    def _resolve_location_id(self, location_id: str) -> str:
+        """Map ark aliases to the home body id for travel math."""
+        if location_id in ("ark", "ark_orbit", "home", ""):
+            return self.home_body_id or location_id
+        return location_id
+
+    def _travel_dv_m_s(self, from_id: str, to_id: str, unit_kind: str = "survey") -> float:
+        """
+        Δv cost (m/s) for a unit hop. Survey probes are low-thrust ion → higher budget burn
+        than pure chemical Hohmann. Local planet-system hops are cheaper.
+        """
+        from .orbits import hohmann_transfer
+
+        assert self.system
+        from_id = self._resolve_location_id(from_id)
+        to_id = self._resolve_location_id(to_id)
+        if from_id == to_id:
+            return 0.0
+
+        fb = self.system.body_by_id(from_id)
+        tb = self.system.body_by_id(to_id)
+
+        def planet_key(body_id: str, body) -> Optional[str]:
+            if body is None:
+                return body_id
+            if body.kind == "moon":
+                return body.parent_id
+            return body.id
+
+        if tb and fb and planet_key(from_id, fb) == planet_key(to_id, tb):
+            # Local moon/planet rephasing
+            base = 280.0
+            if fb.kind == "moon" and tb.kind == "moon" and fb.id != tb.id:
+                base = 420.0
+            elif fb.kind != tb.kind:
+                base = 350.0
+            return base
+
+        r1 = self._heliocentric_radius_m(from_id)
+        r2 = self._heliocentric_radius_m(to_id)
+        if abs(r1 - r2) / max(r1, r2) < 0.01:
+            return 180.0
+
+        dv_h, _tof = hohmann_transfer(r1, r2, self.system.star_mu)
+        # Playable budgets: high-Isp ion / efficient tugs use a fraction of chemical Hohmann
+        # as "tank units" so outer system is expensive but not a single-hop brick wall.
+        # Far transfers still cost more; return-to-ark / depots matter for campaigns.
+        if unit_kind == "survey":
+            return max(200.0, dv_h * 0.22)
+        if unit_kind == "miner":
+            return max(250.0, dv_h * 0.28)
+        return max(300.0, dv_h * 0.35)
+
     def _travel_months(self, from_id: str, to_id: str, unit_kind: str = "hauler") -> float:
         """
         Cruise time from orbital mechanics (Hohmann between heliocentric radii).
@@ -850,6 +977,8 @@ class Game:
         from .constants import DAYS_PER_MONTH, SECONDS_PER_DAY
 
         assert self.system
+        from_id = self._resolve_location_id(from_id)
+        to_id = self._resolve_location_id(to_id)
         if from_id == to_id:
             # Already there: still not instant (station-keeping / phasing)
             return 0.25 if unit_kind == "survey" else 0.1
@@ -900,38 +1029,117 @@ class Game:
         # Floor: even "nearby" neighbors take real time
         return max(0.75, total)
 
+    def _spend_dv(self, u: FleetUnit, dv_cost: float, label: str) -> None:
+        """Deduct Δv from unit tanks; raise if insufficient."""
+        if u.dv_capacity_m_s <= 0:
+            return  # unlimited (ark)
+        if dv_cost <= 1e-6:
+            return
+        if u.dv_remaining_m_s + 1e-6 < dv_cost:
+            raise ValueError(
+                f"{u.name} needs {dv_cost:.0f} m/s Δv for {label}, "
+                f"has {u.dv_remaining_m_s:.0f} m/s remaining — return to ark or a refuel depot"
+            )
+        u.dv_remaining_m_s = max(0.0, u.dv_remaining_m_s - dv_cost)
+
+    def _can_refuel_at(self, location_id: str) -> tuple[bool, str]:
+        """(ok, reason). Ark home or site with refuel_depot."""
+        loc = self._resolve_location_id(location_id)
+        if loc == self.home_body_id and any(u.kind == "ark" for u in self.fleet.values()):
+            return True, "ark"
+        site = self.sites.get(loc)
+        if site and "refuel_depot" in site.buildings:
+            return True, "depot"
+        return False, ""
+
+    def _refuel_unit(self, u: FleetUnit, source: str) -> float:
+        """Fill tanks. Returns m/s restored. Depot spends chem_prop; ark is free refill."""
+        if u.dv_capacity_m_s <= 0:
+            return 0.0
+        need = u.dv_capacity_m_s - u.dv_remaining_m_s
+        if need <= 1e-6:
+            return 0.0
+        if source == "depot":
+            site = self.sites.get(u.location_id)
+            if not site or "refuel_depot" not in site.buildings:
+                raise ValueError("no refuel depot here")
+            # ~1 t chem_prop per 150 m/s restored (playable abstraction)
+            prop_need = need / 150.0
+            have = site.stockpile.get("chem_prop", 0.0)
+            if have + 1e-9 < 0.5:
+                raise ValueError("depot propellant empty — haul chem_prop here")
+            fraction = min(1.0, have / max(prop_need, 1e-6))
+            restored = need * fraction
+            site.stockpile["chem_prop"] = have - prop_need * fraction
+            u.dv_remaining_m_s = min(u.dv_capacity_m_s, u.dv_remaining_m_s + restored)
+            return restored
+        # ark: full free refill (seed industry / ship stores)
+        u.dv_remaining_m_s = u.dv_capacity_m_s
+        return need
+
     def estimate_order(self, unit_id: str, order: str, target_id: str = "") -> dict:
-        """UI helper: how long will this order take?"""
+        """UI helper: how long / how much Δv will this order take?"""
         u = self.fleet.get(unit_id)
         if not u or not self.system:
-            return {"months": 0, "travel_months": 0, "work_months": 0}
+            return {"months": 0, "travel_months": 0, "work_months": 0, "dv_m_s": 0}
         work = 0.0
         if order == "survey":
-            # Transit only — survey continues until recalled (no one-shot dump)
             work = 0.0
         elif order == "mine":
-            work = 1.5  # shift once a site exists
-        elif order == "move":
+            work = 1.5
+        elif order in ("move", "return_ark"):
             work = 0.0
         elif order == "idle":
-            return {"months": 0, "travel_months": 0, "work_months": 0}
-        # target_id for mine may be a mine_site id
+            return {
+                "months": 0,
+                "travel_months": 0,
+                "work_months": 0,
+                "dv_m_s": 0,
+                "dv_remaining_m_s": round(u.dv_remaining_m_s, 1),
+                "dv_capacity_m_s": round(u.dv_capacity_m_s, 1),
+            }
+        elif order == "refuel":
+            return {
+                "months": 0.05,
+                "travel_months": 0,
+                "work_months": 0.05,
+                "dv_m_s": 0,
+                "dv_remaining_m_s": round(u.dv_remaining_m_s, 1),
+                "dv_capacity_m_s": round(u.dv_capacity_m_s, 1),
+                "note": "Refill tanks at ark or a refuel depot.",
+            }
+
         dest_body = target_id
-        if order == "mine" and self.system:
+        if order == "return_ark":
+            dest_body = self.home_body_id
+        elif order == "mine" and self.system:
             site = self._find_mine_site(target_id)
             if site:
                 dest_body = site.body_id
-        travel = self._travel_months(u.location_id, dest_body, u.kind) if dest_body else 0.0
-        if order == "idle":
-            travel = 0.0
+        travel = (
+            self._travel_months(u.location_id, dest_body, u.kind) if dest_body else 0.0
+        )
+        dv = (
+            self._travel_dv_m_s(u.location_id, dest_body, u.kind) if dest_body else 0.0
+        )
         note = ""
         if order == "survey":
             note = "Then stays on station; detail improves over months until you recall it."
+        if order == "return_ark":
+            note = "Arriving at ark refills Δv tanks."
+        can = u.dv_capacity_m_s <= 0 or u.dv_remaining_m_s + 1e-6 >= dv
         return {
             "months": round(travel + work, 2),
             "travel_months": round(travel, 2),
             "work_months": round(work, 2),
             "years": round((travel + work) / 12.0, 2),
+            "dv_m_s": round(dv, 1),
+            "dv_remaining_m_s": round(u.dv_remaining_m_s, 1),
+            "dv_capacity_m_s": round(u.dv_capacity_m_s, 1),
+            "dv_after_m_s": round(max(0.0, u.dv_remaining_m_s - dv), 1)
+            if u.dv_capacity_m_s > 0
+            else None,
+            "can_afford_dv": can,
             "note": note,
         }
 
@@ -964,9 +1172,10 @@ class Game:
         self, unit_id: str, order: str, target_id: str = "", resource: str = ""
     ) -> dict:
         """
-        Apply a unit's capability to a target: survey | mine | move.
+        Apply a unit's capability: survey | mine | move | return_ark | refuel | idle.
         Survey with resource="Fe" means "find sources of iron" on that body.
         Mine requires a found extraction site.
+        Units with dv_capacity spend Δv on transit; return_ark / depot refuels.
         """
         self.catch_up()
         u = self.fleet.get(unit_id)
@@ -990,6 +1199,58 @@ class Game:
             self._log("order", f"{u.name}: standing by.")
             return self.snapshot()
 
+        if order == "refuel":
+            ok, source = self._can_refuel_at(u.location_id)
+            if not ok:
+                raise ValueError(
+                    "not at ark or a refuel depot — return to ark or deploy a depot first"
+                )
+            if u.dv_capacity_m_s <= 0:
+                raise ValueError("this unit has no Δv tanks")
+            if u.dv_remaining_m_s >= u.dv_capacity_m_s - 1e-6:
+                self._log("order", f"{u.name}: tanks already full.")
+                return self.snapshot()
+            restored = self._refuel_unit(u, source)
+            self._log(
+                "order",
+                f"{u.name} refueled at {source}: +{restored:.0f} m/s Δv "
+                f"({u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f}).",
+            )
+            return self.snapshot()
+
+        if order == "return_ark":
+            home = self.home_body_id
+            if not home:
+                raise ValueError("no ark home body")
+            if u.location_id == home and u.status == "idle":
+                # Already home — just refuel
+                ok, source = self._can_refuel_at(home)
+                if ok and u.dv_capacity_m_s > 0:
+                    restored = self._refuel_unit(u, source)
+                    self._log(
+                        "order",
+                        f"{u.name} already at ark — tanks topped "
+                        f"(+{restored:.0f} m/s, now {u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f}).",
+                    )
+                else:
+                    self._log("order", f"{u.name} already at ark.")
+                return self.snapshot()
+            travel = self._travel_months(u.location_id, home, u.kind)
+            dv = self._travel_dv_m_s(u.location_id, home, u.kind)
+            self._spend_dv(u, dv, "return to ark")
+            u.order = "return_ark"
+            u.target_id = home
+            u.search_resource = ""
+            u.status = "en_route"
+            u.months_left = max(0.75, travel) if u.location_id != home else 0.1
+            self._log(
+                "order",
+                f"{u.name} → return to ark: {u.months_left:.1f} mo, "
+                f"Δv {dv:.0f} m/s (remaining {u.dv_remaining_m_s:.0f}). "
+                f"Tanks will refill on arrival.",
+            )
+            return self.snapshot()
+
         if order == "survey":
             if CAP_SURVEY not in u.capabilities:
                 raise ValueError("unit cannot survey")
@@ -1006,27 +1267,29 @@ class Game:
                 if not any(d.resource == res for d in body.deposits):
                     raise ValueError(f"not a useful search target here: {res}")
             travel = self._travel_months(u.location_id, target_id, u.kind)
+            dv = self._travel_dv_m_s(u.location_id, target_id, u.kind)
             u.order = "survey"
             u.target_id = target_id
             u.search_resource = res
             goal = f"sources of {RESOURCE_NAMES.get(res, res)}" if res else "broad composition"
             if u.location_id == target_id and travel < 0.05:
-                # Already on station — no transit event
+                # Already on station — no transit / no Δv
                 u.status = "working"
                 u.months_left = 0.0
                 self._log(
                     "order",
                     f"{u.name} begins search for {goal} on {body.name}. "
-                    f"Stays until recalled.",
+                    f"Stays until recalled. Δv {u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f} m/s.",
                 )
             else:
-                # Always schedule arrival on the event queue (even short hops)
+                self._spend_dv(u, dv, f"transit to {body.name}")
                 u.status = "en_route"
                 u.months_left = max(travel, 0.05)
                 self._log(
                     "order",
                     f"{u.name} → {body.name} to find {goal}: "
-                    f"{u.months_left:.2f} mo transit (queued as arrival event).",
+                    f"{u.months_left:.2f} mo, Δv {dv:.0f} m/s "
+                    f"(remaining {u.dv_remaining_m_s:.0f}).",
                 )
             return self.snapshot()
 
@@ -1042,6 +1305,8 @@ class Game:
                 )
             body = self.system.body_by_id(msite.body_id)
             travel = self._travel_months(u.location_id, msite.body_id, u.kind)
+            dv = self._travel_dv_m_s(u.location_id, msite.body_id, u.kind)
+            self._spend_dv(u, dv, f"transit to mine {msite.name}")
             work = 1.5
             u.order = "mine"
             u.target_id = msite.id  # site id
@@ -1050,7 +1315,7 @@ class Game:
             self._log(
                 "order",
                 f"{u.name} → mine {msite.name} on {body.name if body else msite.body_id}: "
-                f"{travel:.1f} mo transit + {work:.1f} mo shift.",
+                f"{travel:.1f} mo transit + {work:.1f} mo shift, Δv {dv:.0f} m/s.",
             )
             return self.snapshot()
 
@@ -1059,13 +1324,16 @@ class Game:
             if not body:
                 raise ValueError("pick a destination")
             travel = self._travel_months(u.location_id, target_id, u.kind)
+            dv = self._travel_dv_m_s(u.location_id, target_id, u.kind)
+            self._spend_dv(u, dv, f"move to {body.name}")
             u.order = "move"
             u.target_id = target_id
             u.status = "en_route"
-            u.months_left = max(0.75, travel)
+            u.months_left = max(0.75, travel) if travel >= 0.05 else max(0.1, travel)
             self._log(
                 "order",
-                f"{u.name} → {body.name}: {u.months_left:.1f} mo transit (~{u.months_left/12:.2f} y).",
+                f"{u.name} → {body.name}: {u.months_left:.1f} mo, "
+                f"Δv {dv:.0f} m/s (remaining {u.dv_remaining_m_s:.0f}).",
             )
             return self.snapshot()
 
@@ -1073,12 +1341,35 @@ class Game:
 
     def _complete_unit_order(self, u: FleetUnit) -> None:
         assert self.system
+        if u.order == "return_ark":
+            home = self.home_body_id or u.target_id
+            u.location_id = home
+            u.status = "idle"
+            u.order = ""
+            u.target_id = ""
+            u.months_left = 0.0
+            restored = 0.0
+            if u.dv_capacity_m_s > 0:
+                restored = self._refuel_unit(u, "ark")
+            body = self.system.body_by_id(home)
+            self._log(
+                "order",
+                f"{u.name} returned to ark at {body.name if body else home}. "
+                f"Tanks refilled (+{restored:.0f} m/s → "
+                f"{u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f}).",
+            )
+            return
+
         if u.order == "move":
             u.location_id = u.target_id
             u.status = "idle"
             u.order = ""
             body = self.system.body_by_id(u.location_id)
-            self._log("order", f"{u.name} arrived at {body.name if body else u.location_id}.")
+            self._log(
+                "order",
+                f"{u.name} arrived at {body.name if body else u.location_id} "
+                f"(Δv {u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f} m/s).",
+            )
             u.target_id = ""
             u.months_left = 0.0
             return
@@ -1572,6 +1863,7 @@ class Game:
             "scanned": list(self.scanned),
             "tech": tech_book_summary(),
             "unit_builds": UNIT_BUILDS,
+            "structure_builds": STRUCTURE_BUILDS,
             "transit_months_left": round(self.transit_months_left, 2),
             "event_queue": self.event_queue()[:8],
             "next_event": (self.event_queue() or [None])[0],

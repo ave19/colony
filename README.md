@@ -10,8 +10,9 @@ You lead a colony ship into a system that already has remote survey data on file
 2. **Commit** to a dossier → multi-year transit.
 3. **Arrive materials-only** — people, know-how, seed stock. **No** pre-built survey sats / miners / haulers.
 4. **Authorize builds** on the ark (survey sat, miner, hauler) — materials + time.
-5. **Click the Colony Ark** — opens the **command console** cascade (survey priorities, fabrication, cargo, status).
-6. **Order units** — select unit + body: scan moon / find sources of X / extract at a mine site.
+5. **Click the Colony Ark** — command console (survey priorities, fabrication including **refuel depots**, cargo).
+6. **Click a survey probe** — action card: move (shows Δv cost), survey focus, **return to ark** (refuels), stand by.
+7. Probes have **fixed Δv tanks**; hops spend budget. Refuel at ark or a deployed depot.
 7. **Found a project** → contracts (needs). Bootstrap with ark cargo, or **haul** with transfer options.
 8. **Cargo transfers** — Economy (Hohmann) / Expedited / Sprint: propellant vs months + real Δv.
 9. **Warp** advances the event queue (fab, arrivals, survey checkpoints, hauls). Idle warp skips nothing.

@@ -104,6 +104,13 @@ BUILDINGS = {
         "Parts and panels from feedstock.",
         ["make_panel", "make_wafer"],
     ),
+    "refuel_depot": BuildingType(
+        "refuel_depot",
+        "Refueling depot",
+        {"steel": 40, "chip": 3, "chem_prop": 35, "Al": 12},
+        "Stores propellant and refills unit Δv budgets. Seed stock of chem_prop on deploy.",
+        ["refuel"],
+    ),
 }
 
 
@@ -266,6 +273,8 @@ def expand_base_plan(power_id: str, hab_id: str) -> dict:
 
 
 # Units the ark can fabricate after arrival (materials + time — not pre-packed).
+# dv_capacity_m_s: onboard Δv budget for units that burn propellant from tanks
+# (survey probes are ion / high-Isp with a fixed tank — not free infinite moves).
 UNIT_BUILDS = {
     "survey": {
         "id": "survey",
@@ -274,7 +283,8 @@ UNIT_BUILDS = {
         "cost": {"steel": 8.0, "chip": 4.0, "panel": 2.0, "Al": 3.0},
         "months": 1.5,
         "capabilities": ["survey"],
-        "description": "Remote sensors to find suitable extraction sites. Built on-station from seed stock.",
+        "dv_capacity_m_s": 12000.0,
+        "description": "Remote sensors for extraction sites. Fixed ion propellant budget — return to ark or a depot to refuel.",
     },
     "miner": {
         "id": "miner",
@@ -283,6 +293,7 @@ UNIT_BUILDS = {
         "cost": {"steel": 15.0, "chip": 3.0, "panel": 1.0},
         "months": 2.0,
         "capabilities": ["mine"],
+        "dv_capacity_m_s": 6000.0,
         "description": "Surface/asteroid extractor. Needs a surveyed mine site before it can dig.",
     },
     "hauler": {
@@ -292,7 +303,21 @@ UNIT_BUILDS = {
         "cost": {"steel": 25.0, "chip": 2.0, "chem_prop": 10.0, "Al": 5.0},
         "months": 2.5,
         "capabilities": ["haul"],
-        "description": "Chemical tug for orbital cargo. Propellant loaded at launch.",
+        "dv_capacity_m_s": 8000.0,
+        "description": "Chemical tug for orbital cargo. Burns cargo chem_prop on hauls; tanks still matter for station moves.",
+    },
+}
+
+# Site structures the ark fabricates then deploys to a body (not fleet units).
+STRUCTURE_BUILDS = {
+    "refuel_depot": {
+        "id": "refuel_depot",
+        "name": "Refueling depot",
+        "kind": "structure",
+        "building": "refuel_depot",
+        "cost": {"steel": 40.0, "chip": 3.0, "chem_prop": 35.0, "Al": 12.0},
+        "months": 3.0,
+        "description": "Propellant store on a body. Units that dock here refill Δv (uses depot chem_prop stock).",
     },
 }
 
@@ -301,6 +326,7 @@ def tech_book_summary() -> dict:
     return {
         "resources": RESOURCE_NAMES,
         "unit_builds": UNIT_BUILDS,
+        "structure_builds": STRUCTURE_BUILDS,
         "buildings": {k: {"name": v.name, "cost": v.build_cost, "description": v.description} for k, v in BUILDINGS.items()},
         "recipes": {
             k: {

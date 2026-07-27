@@ -585,6 +585,23 @@ details.drawer summary {
 .cascade-mission {
   margin-bottom: 14px;
 }
+.dv-meter {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: rgba(15, 24, 36, 0.95);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.dv-meter .dv-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.dv-meter .dv-label strong { color: var(--text); }
+.dv-meter.dv-ok .queue-bar > i { background: linear-gradient(90deg, #1a7a5a, var(--good)); }
+.dv-meter.dv-mid .queue-bar > i { background: linear-gradient(90deg, #8a6a20, #e8a23a); }
+.dv-meter.dv-low .queue-bar > i { background: linear-gradient(90deg, #8a3020, #e06050); }
+.dv-meter .queue-bar { margin: 0; }
 .cascade-window.unit-card {
   width: min(560px, calc(100vw - 32px));
 }
