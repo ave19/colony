@@ -660,30 +660,41 @@ def _make_planet(
 
 def _nested_moon_radii_Rp(rng: random.Random, planet: Body, n: int) -> List[float]:
     """
-    Strictly increasing semi-major axes in units of planetary radii.
-    Modelled on Galilean / major Saturnian moon ladders — never co-orbital.
+    Semi-major axes in planetary radii from Kepler + Laplace-style resonance.
+
+    Jupiter's Io–Europa–Ganymede: mean motions 4:2:1 ⇒ periods 1:2:4.
+    Kepler III: a ∝ P^{2/3}, so a ratios = 1 : 2^{2/3} : 4^{2/3} ≈ 1 : 1.587 : 2.520
+    (Io ~5.9 R♃ → Europa ~9.4, Ganymede ~15). Callisto sits outside that chain.
+
+    Never co-orbital: each moon gets its own a from the period ladder.
     """
     if n <= 0:
         return []
-    # Reference ladders (R_planet): Io–Callisto-ish, then outer irregular-ish
+
     if planet.planet_class == "gas_giant":
-        template = [5.9, 9.4, 15.0, 26.3, 38.0, 55.0]
+        # Innermost major moon near Io-class (with light jitter)
+        a0 = 5.9 * rng.uniform(0.95, 1.08)
+        # Period multipliers relative to innermost: 1, 2, 4, then Callisto-ish ~9.4, then outer
+        period_mult = [1.0, 2.0, 4.0, 9.4, 18.0, 32.0]
     elif planet.planet_class == "ice_giant":
-        template = [5.0, 8.5, 14.0, 22.0, 33.0]
+        # Tighter packed ice-giant majors; still resonant chain
+        a0 = 5.0 * rng.uniform(0.95, 1.08)
+        period_mult = [1.0, 2.0, 4.0, 8.0, 16.0]
     else:
-        # Rocky: rare companions; Earth–Moon ~60 R⊕ is large
-        template = [35.0, 55.0, 80.0]
+        # Rocky: not a Laplace chain — wide single/double companion
+        a0 = 40.0 * rng.uniform(0.9, 1.15)
+        period_mult = [1.0, 2.8, 6.0]
 
     mults: List[float] = []
-    prev = 0.0
     for i in range(n):
-        base = template[i] if i < len(template) else prev * rng.uniform(1.4, 1.65)
-        # Jitter but keep ≥25% separation from previous orbit
-        r = base * rng.uniform(0.94, 1.06)
-        if prev > 0:
-            r = max(r, prev * 1.28)
-        mults.append(r)
-        prev = r
+        p_ratio = period_mult[i] if i < len(period_mult) else period_mult[-1] * (2.0 ** (i - len(period_mult) + 1))
+        # a / a0 = (P / P0)^{2/3}
+        a_rp = a0 * (p_ratio ** (2.0 / 3.0))
+        # Tiny independent jitter on phase of formation, not enough to break nesting
+        a_rp *= rng.uniform(0.98, 1.02)
+        if mults and a_rp <= mults[-1] * 1.15:
+            a_rp = mults[-1] * 1.2
+        mults.append(a_rp)
     return mults
 
 

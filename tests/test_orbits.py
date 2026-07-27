@@ -75,7 +75,6 @@ def test_moons_have_distinct_orbits_like_jupiter():
         smas = sorted(m.semi_major_m for m in sibs)
         for a, b in zip(smas, smas[1:]):
             assert b > a * 1.2, f"moons of {pid} too close: {a} vs {b}"
-        parent = sys.body_by_id(pid)
         # Display radii also distinct
         d = sys.to_dict(0.0)
         moon_dicts = [x for x in d["bodies"] if x["kind"] == "moon" and x["parent_id"] == pid]
@@ -83,3 +82,31 @@ def test_moons_have_distinct_orbits_like_jupiter():
         for a, b in zip(disp, disp[1:]):
             assert b > a * 1.05, "display rings must not coincide"
     assert checked >= 1, "need at least one multi-moon planet in test system"
+
+
+def test_galilean_period_resonance_kepler():
+    """
+    First three major moons on a gas giant should approximate period ratios 1:2:4
+    (Laplace chain), which via Kepler implies a ratios 1 : 2^(2/3) : 4^(2/3).
+    """
+    from colony.sim.constants import G
+    from colony.sim.orbits import period_seconds
+
+    sys = generate_system(seed=42, star_type_id="G2V")
+    giant = next(b for b in sys.bodies if b.planet_class == "gas_giant")
+    moons = sorted(
+        [m for m in sys.bodies if m.parent_id == giant.id],
+        key=lambda m: m.semi_major_m,
+    )
+    assert len(moons) >= 3
+    mu = G * giant.mass_kg
+    p0 = period_seconds(moons[0].semi_major_m, mu)
+    p1 = period_seconds(moons[1].semi_major_m, mu)
+    p2 = period_seconds(moons[2].semi_major_m, mu)
+    # Allow formation jitter; still clearly near 1:2:4
+    assert 1.7 < p1 / p0 < 2.3, f"P1/P0={p1/p0}"
+    assert 3.4 < p2 / p0 < 4.6, f"P2/P0={p2/p0}"
+    # Kepler consistency: a2/a0 ≈ (P2/P0)^(2/3)
+    a_ratio = moons[2].semi_major_m / moons[0].semi_major_m
+    expected = (p2 / p0) ** (2.0 / 3.0)
+    assert abs(a_ratio - expected) / expected < 0.05
