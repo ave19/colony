@@ -144,18 +144,25 @@ class FleetUnit:
     id: str
     name: str
     kind: str  # ark | survey | miner | hauler
-    location_id: str  # body id or "transit"
+    location_id: str  # body id, or "ark" while docked at the colony ship
     status: str = "idle"  # idle | en_route | working
     order: str = ""
     target_id: str = ""
     search_resource: str = ""  # directed survey: "Fe", "H2O", …
     months_left: float = 0.0
+    months_total: float = 0.0  # for transit progress on map
+    transit_from_id: str = ""  # where this hop started (map path)
     capabilities: List[str] = field(default_factory=list)
     # Fixed propellant budget (m/s). 0 capacity = unlimited (ark command node).
     dv_capacity_m_s: float = 0.0
     dv_remaining_m_s: float = 0.0
 
     def to_dict(self) -> dict:
+        progress = None
+        if self.status == "en_route" and self.months_total > 1e-9:
+            progress = round(
+                max(0.0, min(1.0, 1.0 - self.months_left / self.months_total)), 3
+            )
         return {
             "id": self.id,
             "name": self.name,
@@ -166,6 +173,9 @@ class FleetUnit:
             "target_id": self.target_id,
             "search_resource": self.search_resource,
             "months_left": round(self.months_left, 2),
+            "months_total": round(self.months_total, 2),
+            "transit_from_id": self.transit_from_id,
+            "transit_progress": progress,
             "capabilities": self.capabilities,
             "dv_capacity_m_s": round(self.dv_capacity_m_s, 1),
             "dv_remaining_m_s": round(self.dv_remaining_m_s, 1),
@@ -1084,19 +1094,21 @@ class Game:
         uid = f"{job.unit_kind[0:2]}{n}"
         name = f"{job.name} {n}"
         cap = float(job.dv_capacity_m_s or 0.0)
+        # Craft leave the fabrication bay *on the ark* — not already on the planet.
+        # They must transit (and burn Δv) to any body, including the home world.
         self.fleet[uid] = FleetUnit(
             id=uid,
             name=name,
             kind=job.unit_kind,
-            location_id=home,
+            location_id="ark",
             capabilities=list(job.capabilities),
             dv_capacity_m_s=cap,
             dv_remaining_m_s=cap,  # full tanks on launch from ark
         )
         self._log(
             "build",
-            f"Fabrication complete: {name} ready at ark"
-            + (f" (Δv {cap:.0f} m/s tanks full)." if cap > 0 else "."),
+            f"Fabrication complete: {name} docked at ark"
+            + (f" (Δv {cap:.0f} m/s tanks full). Transit required to any body." if cap > 0 else "."),
         )
 
     def rename_unit(self, unit_id: str, name: str) -> dict:
@@ -1462,7 +1474,7 @@ class Game:
             id="ark",
             name="Colony Ark",
             kind="ark",
-            location_id=home_id,
+            location_id="ark",  # ark is its own map node, parked at home_body
             capabilities=[CAP_COMMAND, CAP_BUILD, CAP_HAUL],
         )
 
@@ -1577,14 +1589,35 @@ class Game:
             return parent.semi_major_m if parent else b.semi_major_m
         return b.semi_major_m
 
+    def _is_ark_loc(self, location_id: str) -> bool:
+        return location_id in ("ark", "ark_orbit")
+
     def _resolve_location_id(self, location_id: str) -> str:
-        """Map ark aliases to the home body id for travel math."""
+        """
+        Body id for *heliocentric* travel math.
+        Note: "ark" is a real dock for fleet ops — use _is_ark_loc / _same_location
+        for presence. This maps ark → home planet only for orbital radii.
+        """
         if location_id in ("ark", "ark_orbit", "home", ""):
             return self.home_body_id or location_id
         return location_id
 
     def _same_location(self, a: str, b: str) -> bool:
+        """True only if both docked at ark, or both on the same body (not ark≈planet)."""
+        if self._is_ark_loc(a) and self._is_ark_loc(b):
+            return True
+        if self._is_ark_loc(a) or self._is_ark_loc(b):
+            return False
         return self._resolve_location_id(a) == self._resolve_location_id(b)
+
+    def _begin_transit(self, u: FleetUnit, dest_id: str, travel: float, order: str) -> None:
+        """Mark unit en route; path drawn from transit_from → dest on the map."""
+        u.transit_from_id = u.location_id
+        u.target_id = dest_id
+        u.order = order
+        u.status = "en_route"
+        u.months_total = max(travel, 0.05)
+        u.months_left = u.months_total
 
     def _travel_dv_m_s(self, from_id: str, to_id: str, unit_kind: str = "survey") -> float:
         """
@@ -1594,13 +1627,18 @@ class Game:
         from .orbits import hohmann_transfer
 
         assert self.system
-        from_id = self._resolve_location_id(from_id)
-        to_id = self._resolve_location_id(to_id)
-        if from_id == to_id:
+        # Leaving / returning to the ark always costs a small orbital hop
+        # (even when the destination is the home planet the ark is parked at).
+        ark_leg = False
+        if self._is_ark_loc(from_id) ^ self._is_ark_loc(to_id):
+            ark_leg = True
+        if self._same_location(from_id, to_id):
             return 0.0
 
-        fb = self.system.body_by_id(from_id)
-        tb = self.system.body_by_id(to_id)
+        from_body = self._resolve_location_id(from_id)
+        to_body = self._resolve_location_id(to_id)
+        fb = self.system.body_by_id(from_body)
+        tb = self.system.body_by_id(to_body)
 
         def planet_key(body_id: str, body) -> Optional[str]:
             if body is None:
@@ -1609,35 +1647,43 @@ class Game:
                 return body.parent_id
             return body.id
 
-        if tb and fb and planet_key(from_id, fb) == planet_key(to_id, tb):
+        # Ark ↔ home planet (or any body in home planet system after resolve)
+        if ark_leg and from_body == to_body:
+            # Separation burn / rendezvous from high ark orbit to LO
+            return 220.0 if unit_kind == "survey" else 280.0
+
+        if tb and fb and planet_key(from_body, fb) == planet_key(to_body, tb):
             # Local moon/planet rephasing
             base = 280.0
             if fb.kind == "moon" and tb.kind == "moon" and fb.id != tb.id:
                 base = 420.0
             elif fb.kind != tb.kind:
                 base = 350.0
+            if ark_leg:
+                base += 120.0
             # Powered mass driver: EM assist for bots/probes leaving surface
-            if fb and self.mass_driver_online(from_id):
+            if fb and not self._is_ark_loc(from_id) and self.mass_driver_online(from_body):
                 base *= 0.25
             return base
 
-        r1 = self._heliocentric_radius_m(from_id)
-        r2 = self._heliocentric_radius_m(to_id)
+        r1 = self._heliocentric_radius_m(from_body)
+        r2 = self._heliocentric_radius_m(to_body)
         if abs(r1 - r2) / max(r1, r2) < 0.01:
-            return 180.0
+            return 180.0 + (80.0 if ark_leg else 0.0)
 
         dv_h, _tof = hohmann_transfer(r1, r2, self.system.star_mu)
         # Playable budgets: high-Isp ion / efficient tugs use a fraction of chemical Hohmann
         # as "tank units" so outer system is expensive but not a single-hop brick wall.
-        # Far transfers still cost more; return-to-ark / depots matter for campaigns.
         if unit_kind == "survey":
             cost = max(200.0, dv_h * 0.22)
         elif unit_kind == "miner":
             cost = max(250.0, dv_h * 0.28)
         else:
             cost = max(300.0, dv_h * 0.35)
+        if ark_leg:
+            cost += 100.0  # ark departure / capture
         # Powered rail launch shaves the surface-lift share of the budget
-        if fb and self.mass_driver_online(from_id):
+        if fb and not self._is_ark_loc(from_id) and self.mass_driver_online(from_body):
             assist = min(cost * 0.35, 800.0)
             cost = max(150.0, cost - assist)
         return cost
@@ -1646,45 +1692,48 @@ class Game:
         """
         Cruise time from orbital mechanics (Hohmann between heliocentric radii).
         Survey sats are low-thrust → longer than a chemical hauler.
-        Same planet / local moon still takes real local time — no teleport.
+        Ark dock → home planet is a real hop (not free).
         """
         from .orbits import hohmann_transfer
         from .constants import DAYS_PER_MONTH, SECONDS_PER_DAY
 
         assert self.system
-        from_id = self._resolve_location_id(from_id)
-        to_id = self._resolve_location_id(to_id)
-        if from_id == to_id:
-            # Already there: still not instant (station-keeping / phasing)
-            return 0.25 if unit_kind == "survey" else 0.1
+        if self._same_location(from_id, to_id):
+            return 0.0
 
-        fb = self.system.body_by_id(from_id) if from_id not in ("ark", "ark_orbit") else None
-        tb = self.system.body_by_id(to_id)
+        ark_leg = self._is_ark_loc(from_id) ^ self._is_ark_loc(to_id)
+        from_body = self._resolve_location_id(from_id)
+        to_body = self._resolve_location_id(to_id)
+
+        # Ark ↔ same planet: days–weeks to leave bay and enter survey/low orbit
+        if ark_leg and from_body == to_body:
+            return 0.55 if unit_kind == "survey" else 0.4
+
+        fb = self.system.body_by_id(from_body)
+        tb = self.system.body_by_id(to_body)
 
         # Local transfer: same planet system (planet ↔ its moon, or moon ↔ moon of same parent)
-        def planet_key(body_id: str, body) -> Optional[str]:
-            if body is None and body_id in ("ark", "ark_orbit"):
-                site = self.sites.get("ark_orbit")
-                return site.body_id if site else None
+        def planet_key(body) -> Optional[str]:
             if body is None:
-                return body_id
+                return None
             if body.kind == "moon":
                 return body.parent_id
             return body.id
 
-        if tb and planet_key(from_id, fb) == planet_key(to_id, tb):
+        if tb and fb and planet_key(fb) == planet_key(tb):
             # Days–weeks to change moon orbits / lander loiter — not interplanetary
             local = 0.4 if unit_kind == "survey" else 0.25
-            # Slightly longer if going to/from a different moon
-            if fb and tb and fb.kind == "moon" and tb.kind == "moon" and fb.id != tb.id:
+            if fb.kind == "moon" and tb.kind == "moon" and fb.id != tb.id:
+                local += 0.2
+            if ark_leg:
                 local += 0.2
             return local
 
-        r1 = self._heliocentric_radius_m(from_id)
-        r2 = self._heliocentric_radius_m(to_id)
+        r1 = self._heliocentric_radius_m(from_body)
+        r2 = self._heliocentric_radius_m(to_body)
         # Avoid identical radii numerical issue
         if abs(r1 - r2) / max(r1, r2) < 0.01:
-            return 0.5
+            return 0.5 + (0.2 if ark_leg else 0.0)
 
         _dv, tof_s = hohmann_transfer(r1, r2, self.system.star_mu)
         months = tof_s / (SECONDS_PER_DAY * DAYS_PER_MONTH)
@@ -1701,6 +1750,8 @@ class Game:
             months *= 1.25
 
         total = months + window
+        if ark_leg:
+            total += 0.15
         # Floor: even "nearby" neighbors take real time
         return max(0.75, total)
 
@@ -1718,8 +1769,13 @@ class Game:
         u.dv_remaining_m_s = max(0.0, u.dv_remaining_m_s - dv_cost)
 
     def _can_refuel_at(self, location_id: str) -> tuple[bool, str]:
-        """(ok, reason). Ark home or site with refuel_depot."""
+        """(ok, reason). Docked at ark, or site with refuel_depot."""
+        if self._is_ark_loc(location_id) and any(
+            u.kind == "ark" for u in self.fleet.values()
+        ):
+            return True, "ark"
         loc = self._resolve_location_id(location_id)
+        # Also allow refuel at home planet if ark is parked there and unit is on that body
         if loc == self.home_body_id and any(u.kind == "ark" for u in self.fleet.values()):
             return True, "ark"
         site = self.sites.get(loc)
@@ -1882,6 +1938,8 @@ class Game:
             u.target_id = ""
             u.search_resource = ""
             u.months_left = 0.0
+            u.months_total = 0.0
+            u.transit_from_id = ""
             self._log("order", f"{u.name}: standing by.")
             return self.snapshot()
 
@@ -1905,12 +1963,8 @@ class Game:
             return self.snapshot()
 
         if order == "return_ark":
-            home = self.home_body_id
-            if not home:
-                raise ValueError("no ark home body")
-            if u.location_id == home and u.status == "idle":
-                # Already home — just refuel
-                ok, source = self._can_refuel_at(home)
+            if self._is_ark_loc(u.location_id) and u.status == "idle":
+                ok, source = self._can_refuel_at("ark")
                 if ok and u.dv_capacity_m_s > 0:
                     restored = self._refuel_unit(u, source)
                     self._log(
@@ -1921,18 +1975,15 @@ class Game:
                 else:
                     self._log("order", f"{u.name} already at ark.")
                 return self.snapshot()
-            travel = self._travel_months(u.location_id, home, u.kind)
-            dv = self._travel_dv_m_s(u.location_id, home, u.kind)
+            travel = self._travel_months(u.location_id, "ark", u.kind)
+            dv = self._travel_dv_m_s(u.location_id, "ark", u.kind)
             self._spend_dv(u, dv, "return to ark")
-            u.order = "return_ark"
-            u.target_id = home
             u.search_resource = ""
-            u.status = "en_route"
-            u.months_left = max(0.75, travel) if u.location_id != home else 0.1
+            self._begin_transit(u, "ark", max(0.4, travel), "return_ark")
             self._log(
                 "order",
                 f"{u.name} → return to ark: {u.months_left:.1f} mo, "
-                f"Δv {dv:.0f} m/s (remaining {u.dv_remaining_m_s:.0f}). "
+                f"burned {dv:.0f} m/s Δv (remaining {u.dv_remaining_m_s:.0f}). "
                 f"Tanks will refill on arrival.",
             )
             return self.snapshot()
@@ -1944,23 +1995,25 @@ class Game:
             if not body:
                 raise ValueError("pick a body to survey")
             res = (resource or "").strip()
-            # Optional: must be a plausible search target for this body
             from .system_gen import _searchable_resources
 
             allowed = _searchable_resources(body)
             if res and res not in allowed:
-                # still allow if deposit exists (player may have prior intel)
                 if not any(d.resource == res for d in body.deposits):
                     raise ValueError(f"not a useful search target here: {res}")
-            u.order = "survey"
-            u.target_id = target_id
             u.search_resource = res
             goal = f"sources of {RESOURCE_NAMES.get(res, res)}" if res else "broad composition"
-            # Already at this body (e.g. ark home world) — start work, no transit, no Δv
-            if self._same_location(u.location_id, target_id):
+            # On the body already (not just docked at ark near it)
+            if not self._is_ark_loc(u.location_id) and self._same_location(
+                u.location_id, target_id
+            ):
                 u.location_id = target_id
+                u.order = "survey"
+                u.target_id = target_id
                 u.status = "working"
                 u.months_left = 0.0
+                u.months_total = 0.0
+                u.transit_from_id = ""
                 self._log(
                     "order",
                     f"{u.name} begins search for {goal} on {body.name} "
@@ -1971,12 +2024,12 @@ class Game:
                 travel = self._travel_months(u.location_id, target_id, u.kind)
                 dv = self._travel_dv_m_s(u.location_id, target_id, u.kind)
                 self._spend_dv(u, dv, f"transit to {body.name}")
-                u.status = "en_route"
-                u.months_left = max(travel, 0.05)
+                from_label = self._location_label(u.location_id)
+                self._begin_transit(u, target_id, travel, "survey")
                 self._log(
                     "order",
-                    f"{u.name} → {body.name} to find {goal}: "
-                    f"{u.months_left:.2f} mo transit, burned {dv:.0f} m/s Δv "
+                    f"{u.name} leaves {from_label} → {body.name} for {goal}: "
+                    f"{u.months_left:.2f} mo, burned {dv:.0f} m/s Δv "
                     f"(remaining {u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f}).",
                 )
             return self.snapshot()
@@ -1984,7 +2037,6 @@ class Game:
         if order == "mine":
             if CAP_MINE not in u.capabilities:
                 raise ValueError("unit cannot mine")
-            # target_id must be a mine_site id (unlocked by survey)
             msite = self._find_mine_site(target_id)
             if not msite:
                 raise ValueError(
@@ -1993,13 +2045,16 @@ class Game:
                 )
             body = self.system.body_by_id(msite.body_id)
             work = 1.5
-            u.order = "mine"
-            u.target_id = msite.id  # site id
-            if self._same_location(u.location_id, msite.body_id):
-                # Already on body — mining shift only, no transit Δv
+            if not self._is_ark_loc(u.location_id) and self._same_location(
+                u.location_id, msite.body_id
+            ):
                 u.location_id = msite.body_id
-                u.status = "en_route"  # uses months_left countdown to complete shift
+                u.order = "mine"
+                u.target_id = msite.id
+                u.status = "en_route"
+                u.months_total = work
                 u.months_left = work
+                u.transit_from_id = msite.body_id
                 self._log(
                     "order",
                     f"{u.name} starts mining shift at {msite.name} on "
@@ -2010,11 +2065,12 @@ class Game:
                 travel = self._travel_months(u.location_id, msite.body_id, u.kind)
                 dv = self._travel_dv_m_s(u.location_id, msite.body_id, u.kind)
                 self._spend_dv(u, dv, f"transit to mine {msite.name}")
-                u.status = "en_route"
-                u.months_left = travel + work
+                from_label = self._location_label(u.location_id)
+                self._begin_transit(u, msite.id, travel + work, "mine")
                 self._log(
                     "order",
-                    f"{u.name} → mine {msite.name} on {body.name if body else msite.body_id}: "
+                    f"{u.name} leaves {from_label} → mine {msite.name} on "
+                    f"{body.name if body else msite.body_id}: "
                     f"{travel:.1f} mo transit + {work:.1f} mo shift, "
                     f"burned {dv:.0f} m/s Δv (remaining {u.dv_remaining_m_s:.0f}).",
                 )
@@ -2024,28 +2080,28 @@ class Game:
             body = self.system.body_by_id(target_id)
             if not body:
                 raise ValueError("pick a destination")
-            if self._same_location(u.location_id, target_id):
+            if not self._is_ark_loc(u.location_id) and self._same_location(
+                u.location_id, target_id
+            ):
                 u.location_id = target_id
                 u.status = "idle"
                 u.order = ""
                 u.target_id = ""
                 u.months_left = 0.0
-                self._log(
-                    "order",
-                    f"{u.name} already at {body.name} — 0 m/s Δv.",
-                )
+                u.months_total = 0.0
+                u.transit_from_id = ""
+                self._log("order", f"{u.name} already at {body.name} — 0 m/s Δv.")
                 return self.snapshot()
             travel = self._travel_months(u.location_id, target_id, u.kind)
             dv = self._travel_dv_m_s(u.location_id, target_id, u.kind)
             self._spend_dv(u, dv, f"move to {body.name}")
-            u.order = "move"
-            u.target_id = target_id
-            u.status = "en_route"
-            u.months_left = max(0.75, travel)
+            from_label = self._location_label(u.location_id)
+            self._begin_transit(u, target_id, max(0.75, travel), "move")
             self._log(
                 "order",
-                f"{u.name} → {body.name}: {u.months_left:.1f} mo, "
-                f"burned {dv:.0f} m/s Δv (remaining {u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f}).",
+                f"{u.name} leaves {from_label} → {body.name}: {u.months_left:.1f} mo, "
+                f"burned {dv:.0f} m/s Δv "
+                f"(remaining {u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f}).",
             )
             return self.snapshot()
 
@@ -2054,20 +2110,23 @@ class Game:
     def _complete_unit_order(self, u: FleetUnit) -> None:
         assert self.system
         if u.order == "return_ark":
-            home = self.home_body_id or u.target_id
-            u.location_id = home
+            u.location_id = "ark"
             u.status = "idle"
             u.order = ""
             u.target_id = ""
             u.months_left = 0.0
+            u.months_total = 0.0
+            u.transit_from_id = ""
             restored = 0.0
             if u.dv_capacity_m_s > 0:
                 restored = self._refuel_unit(u, "ark")
-            body = self.system.body_by_id(home)
+            home = self.home_body_id
+            body = self.system.body_by_id(home) if home else None
             self._log(
                 "order",
-                f"{u.name} returned to ark at {body.name if body else home}. "
-                f"Tanks refilled (+{restored:.0f} m/s → "
+                f"{u.name} docked at ark"
+                + (f" (near {body.name})" if body else "")
+                + f". Tanks refilled (+{restored:.0f} m/s → "
                 f"{u.dv_remaining_m_s:.0f}/{u.dv_capacity_m_s:.0f}).",
             )
             return
@@ -2084,14 +2143,17 @@ class Game:
             )
             u.target_id = ""
             u.months_left = 0.0
+            u.months_total = 0.0
+            u.transit_from_id = ""
             return
 
         if u.order == "survey":
-            # Arrived on station — begin continuous directed/broad survey
             u.location_id = u.target_id
             body = self.system.body_by_id(u.target_id)
             u.status = "working"
             u.months_left = 0.0
+            u.months_total = 0.0
+            u.transit_from_id = ""
             goal = (
                 f"sources of {RESOURCE_NAMES.get(u.search_resource, u.search_resource)}"
                 if u.search_resource
@@ -2115,6 +2177,8 @@ class Game:
                 u.status = "idle"
                 u.order = ""
                 u.months_left = 0.0
+                u.months_total = 0.0
+                u.transit_from_id = ""
                 self._log("mine", f"{u.name}: mine site gone.")
                 return
             u.location_id = msite.body_id
@@ -2122,7 +2186,6 @@ class Game:
             site = self.sites.setdefault(msite.body_id, Site(body_id=msite.body_id))
             took = min(msite.amount_t, 50.0 * msite.grade)
             msite.amount_t -= took
-            # also draw down body deposit pool
             if body:
                 for dep in body.deposits:
                     if dep.resource == msite.resource:
@@ -2137,10 +2200,14 @@ class Game:
             u.order = ""
             u.target_id = ""
             u.months_left = 0.0
+            u.months_total = 0.0
+            u.transit_from_id = ""
             return
 
         u.status = "idle"
         u.months_left = 0.0
+        u.months_total = 0.0
+        u.transit_from_id = ""
 
     # --- scan / base plans ---
     def scan_body(self, body_id: str) -> dict:
@@ -2709,6 +2776,7 @@ class Game:
             ),
             "body_tree": self.body_tree() if self.phase == "system" else [],
             "home_body_id": self.home_body_id,
+            "ark_location_body_id": self.home_body_id,  # map: ark marker near this body
             "build_options": {
                 "power": {k: {"name": v["name"], "description": v["description"]} for k, v in POWER_OPTIONS.items()},
                 "hab": {k: {"name": v["name"], "description": v["description"]} for k, v in HAB_OPTIONS.items()},

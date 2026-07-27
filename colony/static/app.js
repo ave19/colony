@@ -73,6 +73,14 @@ function initMap() {
     if (b && b.kind === "moon" && b.parent_id) expandedPlanets.add(b.parent_id);
     selectBody(id, { focus: false, openRight: true });
   };
+  map.onSelectUnit = (unitId) => {
+    selectedUnitId = unitId;
+    const u = unitById(unitId);
+    $("panel-left").classList.remove("collapsed");
+    if (u && u.kind === "ark") openArkCascade();
+    else if (u) openUnitCascade(u.id, "actions");
+    else render();
+  };
 }
 
 function renderSafe() {
@@ -127,8 +135,12 @@ function render() {
         map.updatePositions(state.system, simSec);
       }
       if (selectedBodyId) map.setSelected(selectedBodyId);
+      map.updateFleet(state.fleet || [], {
+        homeBodyId: state.home_body_id || state.ark_location_body_id,
+        selectedUnitId,
+      });
       $("map-hint").textContent =
-        "Drag orbit · Scroll zoom · Click select · Double-click focus (tracks target) · moons no longer jump";
+        "Click body or fleet craft · paths show transits · double-click focuses · drag/scroll camera";
     } else if (state.phase !== "system") {
       map.clearSystem();
       $("map-hint").textContent =
@@ -1029,8 +1041,13 @@ function renderSurveyCascade(root, u) {
       ? ` · Δv ${formatDv(u.dv_remaining_m_s)} / ${formatDv(u.dv_capacity_m_s)}`
       : "";
   $("cascade-kicker").textContent = "Survey probe · action card";
-  $("cascade-title").textContent = u.name;
+  $("cascade-title").innerHTML = `${escapeHtml(u.name)} <button type="button" class="cascade-rename" id="cascade-rename" title="Edit name">✎</button>`;
   $("cascade-sub").textContent = mission + dvLine;
+  const rnTitle = $("cascade-rename");
+  if (rnTitle) rnTitle.onclick = (ev) => {
+    ev.stopPropagation();
+    promptRenameUnit(u.id);
+  };
 
   const tabs = [
     { id: "actions", label: "Actions" },
@@ -1051,15 +1068,10 @@ function renderSurveyCascade(root, u) {
   });
 
   const body = $("cascade-body");
-  const renameBar = `<p class="muted" style="margin:0 0 10px">
-    <button type="button" class="order" id="unit-rename" style="width:auto;display:inline-block">Rename…</button>
-  </p>`;
-  if (tab === "move") body.innerHTML = renameBar + surveyCascadeMoveHtml(u, loc);
-  else if (tab === "survey") body.innerHTML = renameBar + surveyCascadeFocusHtml(u, loc);
-  else body.innerHTML = renameBar + surveyCascadeActionsHtml(u, loc, mission, busy);
+  if (tab === "move") body.innerHTML = surveyCascadeMoveHtml(u, loc);
+  else if (tab === "survey") body.innerHTML = surveyCascadeFocusHtml(u, loc);
+  else body.innerHTML = surveyCascadeActionsHtml(u, loc, mission, busy);
 
-  const rn = body.querySelector("#unit-rename");
-  if (rn) rn.onclick = () => promptRenameUnit(u.id);
   bindSurveyCascade(body, u, tab);
 }
 
@@ -1363,15 +1375,17 @@ function renderGenericUnitCascade(root, u) {
   const kindLabel =
     u.kind === "miner" ? "Mining bot" : u.kind === "hauler" ? "Hauler" : u.kind;
   $("cascade-kicker").textContent = `${kindLabel} · action card`;
-  $("cascade-title").textContent = u.name;
+  $("cascade-title").innerHTML = `${escapeHtml(u.name)} <button type="button" class="cascade-rename" id="cascade-rename" title="Edit name">✎</button>`;
   $("cascade-sub").textContent = `${u.status}${u.order ? " / " + u.order : ""} · @ ${
     loc ? loc.name : u.location_id
   }${u.dv_capacity_m_s > 0 ? " · Δv " + formatDv(u.dv_remaining_m_s) : ""}`;
+  const rnTitle = $("cascade-rename");
+  if (rnTitle) rnTitle.onclick = (ev) => {
+    ev.stopPropagation();
+    promptRenameUnit(u.id);
+  };
   $("cascade-tabs").innerHTML = `<button type="button" class="cascade-tab active" data-tab="actions">Actions</button>`;
   $("cascade-body").innerHTML = `
-    <p class="muted" style="margin:0 0 10px">
-      <button type="button" class="order" id="unit-rename" style="width:auto;display:inline-block">Rename…</button>
-    </p>
     ${dvBarHtml(u)}
     <p class="cascade-section-lead">
       Select a body on the map, open its card → <strong>Tasks</strong>, and assign this unit.
@@ -1383,8 +1397,6 @@ function renderGenericUnitCascade(root, u) {
       </button>
     </div>
   `;
-  const rn = $("unit-rename");
-  if (rn) rn.onclick = () => promptRenameUnit(u.id);
   const idle = $("gen-idle");
   if (idle) {
     idle.onclick = async () => {
@@ -1434,19 +1446,32 @@ function renderArkCascade(root) {
     };
   });
 
-  const body = $("cascade-body");
-  // Rename control always available under title area via status/actions strip
-  const renameBar = `<p class="muted" style="margin:0 0 10px">
-    <button type="button" class="order" id="ark-rename" style="width:auto;display:inline-block">Rename ship…</button>
-  </p>`;
-  if (tab === "survey") body.innerHTML = renameBar + arkCascadeSurveyHtml();
-  else if (tab === "fab") body.innerHTML = renameBar + arkCascadeFabHtml();
-  else if (tab === "cargo") body.innerHTML = renameBar + arkCascadeCargoHtml();
-  else body.innerHTML = renameBar + arkCascadeStatusHtml();
+  // Edit name on the detail card header (next to title)
+  const titleEl = $("cascade-title");
+  if (titleEl) {
+    titleEl.innerHTML = `${escapeHtml(arkName)} <button type="button" class="cascade-rename" id="cascade-rename" title="Edit name">✎</button>`;
+    const rn = $("cascade-rename");
+    if (rn) rn.onclick = (ev) => {
+      ev.stopPropagation();
+      promptRenameUnit(ark ? ark.id : "ark");
+    };
+  }
 
-  const rn = body.querySelector("#ark-rename");
-  if (rn) rn.onclick = () => promptRenameUnit(ark ? ark.id : "ark");
+  const body = $("cascade-body");
+  if (tab === "survey") body.innerHTML = arkCascadeSurveyHtml();
+  else if (tab === "fab") body.innerHTML = arkCascadeFabHtml();
+  else if (tab === "cargo") body.innerHTML = arkCascadeCargoHtml();
+  else body.innerHTML = arkCascadeStatusHtml();
+
   bindArkCascade(body, tab);
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function factorStatusClass(st) {
@@ -1871,16 +1896,22 @@ function renderFleet() {
   const fleet = state.fleet || [];
   el.innerHTML = fleet
     .map((u) => {
-      const loc = bodyById(u.location_id);
       const isArk = u.kind === "ark";
       const isSurvey = u.kind === "survey";
-      const opensCard = true;
+      let locLabel = "ark";
+      if (u.location_id === "ark" || u.location_id === "ark_orbit") {
+        const home = bodyById(state.home_body_id);
+        locLabel = home ? `ark @ ${home.name}` : "ark";
+      } else {
+        const loc = bodyById(u.location_id);
+        locLabel = loc ? loc.name : u.location_id;
+      }
       const busy =
-        u.status !== "idle"
-          ? `<div class="meta busy">${u.status} ${u.order || ""} ${u.months_left ? u.months_left + " mo" : ""}</div>`
-          : `<div class="meta">@ ${loc ? loc.name : u.location_id}${
-              opensCard ? " · click for card" : ""
-            }</div>`;
+        u.status === "en_route"
+          ? `<div class="meta busy">en route ${u.months_left ? u.months_left + " mo" : ""} · path on map</div>`
+          : u.status !== "idle"
+            ? `<div class="meta busy">${u.status} ${u.order || ""} ${u.months_left ? u.months_left + " mo" : ""}</div>`
+            : `<div class="meta">@ ${locLabel} · click for card</div>`;
       return `<button type="button" class="fleet-item ${isArk ? "ark-item" : ""} ${
         isSurvey ? "survey-item" : ""
       } ${selectedUnitId === u.id ? "selected" : ""}" data-unit="${u.id}">

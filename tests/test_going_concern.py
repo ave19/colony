@@ -563,26 +563,47 @@ def test_haul_from_mass_driver_cheaper_than_chemical():
     assert opts_rail[0].get("mass_driver_ascent") is True
 
 
-def test_survey_same_body_no_dv_burn_different_body_spends():
+def test_probe_starts_at_ark_and_transits_to_home_planet():
+    g = Game(universe_seed=8)
+    _arrive(g)
+    assert g.fleet["ark"].location_id == "ark"
+    g.queue_build("survey")
+    while not any(u.kind == "survey" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    sat = next(u for u in g.fleet.values() if u.kind == "survey")
+    assert sat.location_id == "ark"
+    home = g.home_body_id
+    cap = sat.dv_remaining_m_s
+    # Leaving ark to home planet is a real hop
+    g.issue_order(sat.id, "survey", home, resource="Fe")
+    assert sat.status == "en_route"
+    assert sat.transit_from_id == "ark"
+    assert sat.target_id == home
+    assert sat.months_left > 0
+    assert sat.dv_remaining_m_s < cap
+    assert abs(sat.dv_remaining_m_s - (cap - g._travel_dv_m_s("ark", home, "survey"))) < 1e-6
+    while sat.status == "en_route":
+        g.warp_to_next_event(force=True)
+    assert sat.location_id == home
+    assert sat.status == "working"
+
+
+def test_survey_on_station_no_extra_transit():
     g = Game(universe_seed=8)
     _arrive(g)
     g.queue_build("survey")
     while not any(u.kind == "survey" for u in g.fleet.values()):
         g.warp_to_next_event(force=True)
     sat = next(u for u in g.fleet.values() if u.kind == "survey")
-    home = sat.location_id
+    home = g.home_body_id
+    g.issue_order(sat.id, "survey", home, resource="Fe")
+    while sat.status == "en_route":
+        g.warp_to_next_event(force=True)
     cap = sat.dv_remaining_m_s
-    # Survey home world: already there → work immediately, no Δv
+    g.issue_order(sat.id, "idle")
     g.issue_order(sat.id, "survey", home, resource="Fe")
     assert sat.status == "working"
     assert sat.dv_remaining_m_s == cap
-    g.issue_order(sat.id, "idle")
-    # Survey another planet → must burn Δv
-    dest = next(b for b in g.system.bodies if b.kind == "planet" and b.id != home)
-    g.issue_order(sat.id, "survey", dest.id, resource="Fe")
-    assert sat.status == "en_route"
-    assert sat.dv_remaining_m_s < cap
-    assert sat.dv_remaining_m_s == cap - g._travel_dv_m_s(home, dest.id, "survey")
 
 
 def test_rename_unit():

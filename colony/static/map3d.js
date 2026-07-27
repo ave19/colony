@@ -14,12 +14,17 @@ export class SystemMap3D {
   constructor(canvas) {
     this.canvas = canvas;
     this.bodyMeshes = new Map();
+    this.fleetMeshes = new Map(); // unitId -> { mesh, label, pathLine }
+    this.fleetData = [];
+    this.homeBodyId = null;
     this.focusId = null;
     this.selectedId = null;
+    this.selectedUnitId = null;
     this.systemData = null;
     this.trackFocus = true; // telescope tracking
     this.onSelect = null;
     this.onFocus = null;
+    this.onSelectUnit = null;
 
     // Visual clock: synced from server, advances smoothly between polls
     this._syncSimSeconds = 0;
@@ -64,6 +69,7 @@ export class SystemMap3D {
     this._anim = () => {
       this._tickVisualTime();
       this._layoutBodies();
+      this._layoutFleet();
       this._trackFocusCamera();
       this.controls.update();
       // re-apply track after controls so damping doesn't leave target behind
@@ -144,6 +150,7 @@ export class SystemMap3D {
   }
 
   clearSystem() {
+    this._clearFleet();
     while (this.root.children.length) {
       const o = this.root.children[0];
       this.root.remove(o);
@@ -157,6 +164,198 @@ export class SystemMap3D {
     }
     this.bodyMeshes.clear();
     this.systemData = null;
+    this.homeBodyId = null;
+  }
+
+  _clearFleet() {
+    for (const [, e] of this.fleetMeshes) {
+      if (e.mesh) this.root.remove(e.mesh);
+      if (e.label) this.root.remove(e.label);
+      if (e.pathLine) this.root.remove(e.pathLine);
+      e.mesh?.geometry?.dispose();
+      e.mesh?.material?.dispose();
+      e.pathLine?.geometry?.dispose();
+      e.pathLine?.material?.dispose();
+      if (e.label?.material?.map) e.label.material.map.dispose();
+      e.label?.material?.dispose();
+    }
+    this.fleetMeshes.clear();
+    this.fleetData = [];
+  }
+
+  /**
+   * Draw fleet markers + transit path lines.
+   * @param {Array} fleet unit dicts from server
+   * @param {{ homeBodyId?: string, selectedUnitId?: string }} opts
+   */
+  updateFleet(fleet, opts = {}) {
+    this.fleetData = fleet || [];
+    this.homeBodyId = opts.homeBodyId || this.homeBodyId;
+    this.selectedUnitId = opts.selectedUnitId || null;
+    const ids = new Set(this.fleetData.map((u) => u.id));
+
+    // Remove gone units
+    for (const id of [...this.fleetMeshes.keys()]) {
+      if (!ids.has(id)) {
+        const e = this.fleetMeshes.get(id);
+        if (e.mesh) this.root.remove(e.mesh);
+        if (e.label) this.root.remove(e.label);
+        if (e.pathLine) this.root.remove(e.pathLine);
+        e.mesh?.geometry?.dispose();
+        e.mesh?.material?.dispose();
+        e.pathLine?.geometry?.dispose();
+        e.pathLine?.material?.dispose();
+        this.fleetMeshes.delete(id);
+      }
+    }
+
+    for (const u of this.fleetData) {
+      let entry = this.fleetMeshes.get(u.id);
+      if (!entry) {
+        const color =
+          u.kind === "ark"
+            ? 0x4aa3f0
+            : u.kind === "survey"
+              ? 0x3ecf8e
+              : u.kind === "miner"
+                ? 0xe8a23a
+                : u.kind === "hauler"
+                  ? 0xc08aff
+                  : 0xcccccc;
+        const r = u.kind === "ark" ? 0.12 : 0.07;
+        const mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(r, 12, 12),
+          new THREE.MeshStandardMaterial({
+            color,
+            emissive: new THREE.Color(color).multiplyScalar(0.4),
+            emissiveIntensity: 0.8,
+            roughness: 0.4,
+            metalness: 0.3,
+          })
+        );
+        mesh.userData = { unitId: u.id, kind: "fleet", fleetKind: u.kind };
+        this.root.add(mesh);
+        const label = this._makeLabel(u.name, u.kind === "ark" ? 0.65 : 0.5);
+        this.root.add(label);
+        // Path line (empty until transit)
+        const pathGeo = new THREE.BufferGeometry();
+        const pathMat = new THREE.LineBasicMaterial({
+          color: 0x6ab0e8,
+          transparent: true,
+          opacity: 0.85,
+          depthTest: true,
+        });
+        const pathLine = new THREE.Line(pathGeo, pathMat);
+        pathLine.visible = false;
+        this.root.add(pathLine);
+        entry = { mesh, label, pathLine, data: u };
+        this.fleetMeshes.set(u.id, entry);
+      } else {
+        entry.data = u;
+        // refresh label if renamed
+        if (entry.label && entry._name !== u.name) {
+          this.root.remove(entry.label);
+          entry.label.material?.map?.dispose();
+          entry.label.material?.dispose();
+          entry.label = this._makeLabel(u.name, u.kind === "ark" ? 0.65 : 0.5);
+          this.root.add(entry.label);
+          entry._name = u.name;
+        }
+      }
+      entry._name = u.name;
+    }
+    this._layoutFleet();
+  }
+
+  _bodyWorldPos(bodyId) {
+    if (!bodyId) return null;
+    if (bodyId === "ark" || bodyId === "ark_orbit") {
+      const home = this.homeBodyId;
+      const e = home && this.bodyMeshes.get(home);
+      if (!e) return new THREE.Vector3(0.35, 0.15, 0.2);
+      // Offset above home planet — ark parking orbit
+      return e.mesh.position.clone().add(new THREE.Vector3(0.28, 0.18, 0.12));
+    }
+    // mine site ids fall back to body prefix before first underscore site pattern body_res_site
+    let e = this.bodyMeshes.get(bodyId);
+    if (!e && bodyId.includes("_")) {
+      // try parent body id: p0_Fe_site → p0
+      const parts = bodyId.split("_");
+      if (parts.length >= 1) e = this.bodyMeshes.get(parts[0]);
+    }
+    return e ? e.mesh.position.clone() : null;
+  }
+
+  _layoutFleet() {
+    if (!this.fleetMeshes.size) return;
+    for (const [id, entry] of this.fleetMeshes) {
+      const u = entry.data;
+      if (!u) continue;
+      let pos = null;
+      const inTransit =
+        u.status === "en_route" &&
+        u.transit_from_id &&
+        (u.target_id || u.order === "return_ark");
+
+      if (inTransit) {
+        let toId = u.target_id;
+        if (u.order === "return_ark") toId = "ark";
+        if (u.order === "mine" && toId && toId.includes("_")) {
+          // site id — position at parent body
+          toId = toId.split("_")[0];
+        }
+        const from = this._bodyWorldPos(u.transit_from_id);
+        const to = this._bodyWorldPos(toId);
+        const t = u.transit_progress != null ? u.transit_progress : 0.5;
+        if (from && to) {
+          // Slight arc so path isn't flat through the star always
+          pos = from.clone().lerp(to, t);
+          const mid = from.clone().lerp(to, 0.5);
+          const lift = from.distanceTo(to) * 0.08;
+          pos.y += Math.sin(t * Math.PI) * Math.max(0.15, lift);
+          // Path polyline: from → arc mid → to
+          const arc = mid.clone();
+          arc.y += Math.max(0.2, lift * 1.2);
+          const pts = [from, arc, to];
+          entry.pathLine.geometry.dispose();
+          entry.pathLine.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+          entry.pathLine.visible = true;
+          const sel = this.selectedUnitId === id;
+          entry.pathLine.material.opacity = sel ? 1.0 : 0.55;
+          entry.pathLine.material.color.setHex(sel ? 0x8fd0ff : 0x4a80a8);
+        } else {
+          entry.pathLine.visible = false;
+          pos = from || to || new THREE.Vector3();
+        }
+      } else {
+        entry.pathLine.visible = false;
+        const loc = u.location_id || "ark";
+        pos = this._bodyWorldPos(loc);
+        if (pos && loc !== "ark" && loc !== "ark_orbit" && u.kind !== "ark") {
+          // Park slightly offset from body surface so they are visible
+          const n = id.charCodeAt(0) % 7;
+          pos.add(
+            new THREE.Vector3(
+              0.14 * Math.cos(n),
+              0.1 + 0.04 * (n % 3),
+              0.14 * Math.sin(n)
+            )
+          );
+        }
+      }
+      if (!pos) pos = new THREE.Vector3(0.4, 0.2, 0.3);
+      entry.mesh.position.copy(pos);
+      if (entry.label) {
+        entry.label.position.copy(pos).add(new THREE.Vector3(0, 0.22, 0));
+        entry.label.visible = true;
+      }
+      // Selection pulse
+      const sel = this.selectedUnitId === id;
+      if (entry.mesh.material?.emissive) {
+        entry.mesh.material.emissiveIntensity = sel ? 1.2 : 0.75;
+        entry.mesh.scale.setScalar(sel ? 1.35 : 1.0);
+      }
+    }
   }
 
   setSystem(system, simSeconds = 0) {
@@ -527,37 +726,51 @@ export class SystemMap3D {
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const meshes = [];
+    for (const [, e] of this.fleetMeshes) meshes.push(e.mesh);
     for (const [, e] of this.bodyMeshes) meshes.push(e.mesh);
     const hits = this.raycaster.intersectObjects(meshes, false);
     if (!hits.length) return null;
-    return hits[0].object.userData.bodyId || null;
+    const ud = hits[0].object.userData;
+    if (ud.kind === "fleet" && ud.unitId) return { type: "unit", id: ud.unitId };
+    if (ud.bodyId) return { type: "body", id: ud.bodyId };
+    return null;
   }
 
   _onPointerDown(event) {
     if (event.button !== 0) return;
-    const id = this._pick(event);
-    this._downId = id;
+    const pick0 = this._pick(event);
+    this._downPick = pick0;
     this._downX = event.clientX;
     this._downY = event.clientY;
     const up = (e) => {
       window.removeEventListener("pointerup", up);
       const dist = Math.hypot(e.clientX - this._downX, e.clientY - this._downY);
       if (dist > 5) return;
-      const pick = this._pick(e) || this._downId;
-      if (pick) {
-        this.setSelected(pick);
-        if (this.onSelect) this.onSelect(pick);
+      const pick = this._pick(e) || this._downPick;
+      if (!pick) return;
+      if (pick.type === "unit") {
+        this.selectedUnitId = pick.id;
+        this._layoutFleet();
+        if (this.onSelectUnit) this.onSelectUnit(pick.id);
+      } else if (pick.type === "body") {
+        this.setSelected(pick.id);
+        if (this.onSelect) this.onSelect(pick.id);
       }
     };
     window.addEventListener("pointerup", up);
   }
 
   _onDblClick(event) {
-    const id = this._pick(event);
-    if (id) {
-      this.setSelected(id);
-      this.focusBody(id);
-      if (this.onSelect) this.onSelect(id);
+    const pick = this._pick(event);
+    if (!pick) return;
+    if (pick.type === "body") {
+      this.setSelected(pick.id);
+      this.focusBody(pick.id);
+      if (this.onSelect) this.onSelect(pick.id);
+    } else if (pick.type === "unit") {
+      this.selectedUnitId = pick.id;
+      this._layoutFleet();
+      if (this.onSelectUnit) this.onSelectUnit(pick.id);
     }
   }
 }
