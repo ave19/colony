@@ -1014,7 +1014,7 @@ class Game:
                 a_m = body.semi_major_m
             a_au = max(a_m / AU_M, 0.05)
             insolation = lum / (a_au * a_au)
-            solar_only += 25.0 * min(max(insolation, 0.0), 5.0)
+            solar_only += 28.0 * min(max(insolation, 0.0), 4.0)
         if solar_only + 1e-9 >= MASS_DRIVER_POWER_MW:
             return  # pure electric shot
         if "chem_genset" in site.buildings:
