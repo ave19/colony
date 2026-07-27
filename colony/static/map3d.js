@@ -31,21 +31,22 @@ export class SystemMap3D {
     this.renderer.setClearColor(0x02050a, 1);
 
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(0x02050a, 0.012);
+    // No distance fog — zooming out must keep planets/star readable (system map, not atmosphere).
 
-    this.camera = new THREE.PerspectiveCamera(50, 1, 0.01, 5000);
+    this.camera = new THREE.PerspectiveCamera(50, 1, 0.01, 8000);
     this.camera.position.set(0, 28, 48);
 
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.06;
     this.controls.minDistance = 0.15;
-    this.controls.maxDistance = 200;
+    this.controls.maxDistance = 400;
     this.controls.target.set(0, 0, 0);
 
     this._addStars();
-    this.scene.add(new THREE.AmbientLight(0x334455, 0.55));
-    this.sunLight = new THREE.PointLight(0xfff0d0, 2.2, 0, 0);
+    // Strong ambient so bodies stay visible when far (point light alone falls off visually)
+    this.scene.add(new THREE.AmbientLight(0x8899aa, 0.85));
+    this.sunLight = new THREE.PointLight(0xfff0d0, 1.4, 0, 0);
     this.scene.add(this.sunLight);
 
     this.root = new THREE.Group();
@@ -205,7 +206,13 @@ export class SystemMap3D {
       }
       const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(radius, 24, 24),
-        new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.15, emissive: 0x000000 })
+        new THREE.MeshStandardMaterial({
+          color,
+          roughness: 0.65,
+          metalness: 0.12,
+          emissive: new THREE.Color(color).multiplyScalar(0.15),
+          emissiveIntensity: 0.35,
+        })
       );
       mesh.userData = { bodyId: b.id, kind: b.kind };
       this.root.add(mesh);
@@ -443,7 +450,7 @@ export class SystemMap3D {
       this.controls.target.set(0, 0, 0);
       this.camera.position.set(0, 28, 48);
       this.controls.minDistance = 0.8;
-      this.controls.maxDistance = 200;
+      this.controls.maxDistance = 400;
       this.controls.update();
       this._updateFocusVisibility();
       if (this.onFocus) this.onFocus(null);
@@ -481,9 +488,16 @@ export class SystemMap3D {
   _updateSelectionVisual() {
     for (const [, entry] of this.bodyMeshes) {
       const sel = entry.mesh.userData.bodyId === this.selectedId;
-      if (entry.mesh.material && entry.mesh.material.emissive) {
-        entry.mesh.material.emissive.setHex(sel ? 0x1a4a7a : 0x000000);
-        entry.mesh.material.emissiveIntensity = sel ? 0.55 : 0;
+      const mat = entry.mesh.material;
+      if (!mat || !mat.emissive) continue;
+      if (sel) {
+        mat.emissive.setHex(0x3a7ab8);
+        mat.emissiveIntensity = 0.65;
+      } else {
+        // Keep a little self-illumination so zoom-out doesn't go black
+        const base = mat.color ? mat.color.clone().multiplyScalar(0.15) : new THREE.Color(0x222222);
+        mat.emissive.copy(base);
+        mat.emissiveIntensity = 0.35;
       }
     }
   }
