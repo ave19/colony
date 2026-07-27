@@ -227,32 +227,80 @@ function renderCatalog() {
     el.innerHTML = '<p class="empty">No archive open.</p>';
     return;
   }
+  // Compact list — full dossier opens on the right
   el.innerHTML = state.catalog
     .map((c) => {
-      const title = c.star.designation || c.star.name;
-      const g =
-        c.gas_giant_period_years != null ? ` · gas giant ~${c.gas_giant_period_years} y` : "";
-      const ds = c.dossier_id ? `<p class="muted">${c.dossier_id} · ${c.status || "on file"} · completeness ${c.completeness ?? "?"}</p>` : "";
-      return `<div class="card">
-        <h3>${title}</h3>
-        ${ds}
-        <p>${c.survey_summary}</p>
-        <p>Outer ~${c.outer_au ?? "?"} AU${g}</p>
-        <button class="primary" data-seed="${c.seed}">Commit to this dossier</button>
-      </div>`;
+      const title = c.star.name || c.star.designation;
+      const spectral = c.star.spectral || "";
+      const sel = Number(selectedDossierSeed) === Number(c.seed) ? "selected" : "";
+      return `<button type="button" class="fleet-item dossier-row ${sel}" data-seed="${c.seed}">
+        <div class="name">${title}</div>
+        <div class="meta">${spectral}${c.difficulty != null ? " · difficulty " + c.difficulty : ""}</div>
+      </button>`;
     })
     .join("");
   el.querySelectorAll("[data-seed]").forEach((btn) => {
-    btn.onclick = async () => {
-      state = await api("/api/select_star", {
-        method: "POST",
-        body: JSON.stringify({ seed: Number(btn.dataset.seed) }),
-      });
-      selectedUnitId = null;
-      selectedBodyId = null;
+    btn.onclick = () => {
+      selectedDossierSeed = Number(btn.dataset.seed);
+      $("panel-right").classList.remove("collapsed");
       render();
     };
   });
+}
+
+function renderDossierDetail() {
+  const el = $("dossier-detail");
+  const hint = $("right-menu-hint");
+  if (!el) return;
+  if (state.phase !== "menu") {
+    el.innerHTML = "";
+    return;
+  }
+  const c = (state.catalog || []).find((d) => Number(d.seed) === Number(selectedDossierSeed));
+  if (!c) {
+    if (hint) {
+      hint.hidden = false;
+      hint.textContent = state.catalog?.length
+        ? "Select a star on the left to open its dossier."
+        : "Open the survey archive on the left to begin.";
+    }
+    el.innerHTML = "";
+    return;
+  }
+  if (hint) hint.hidden = true;
+  const title = c.star.designation || c.star.name;
+  const g =
+    c.gas_giant_period_years != null
+      ? `<p><strong>Gas giant period</strong> ~${c.gas_giant_period_years} y</p>`
+      : "";
+  el.innerHTML = `
+    <h2>Dossier</h2>
+    <div class="card">
+      <h3>${title}</h3>
+      <p class="muted">${c.dossier_id || ""} · ${c.status || "on file"}</p>
+      <p>${c.survey_summary || ""}</p>
+      <p><strong>Planets</strong> ${c.planet_count ?? "—"} · <strong>Moons</strong> ${c.moon_count ?? "—"}</p>
+      <p><strong>Outer system</strong> ~${c.outer_au ?? "?"} AU</p>
+      ${g}
+      <p><strong>Survey completeness</strong> ${c.completeness != null ? Math.round(c.completeness * 100) + "%" : "—"}</p>
+      <p class="muted">${c.observed_from || "Remote observation"}</p>
+      <button type="button" class="primary" id="btn-commit-dossier" style="width:100%;margin-top:10px">
+        Commit transit to ${c.star.name || "this star"}
+      </button>
+    </div>`;
+  const btn = $("btn-commit-dossier");
+  if (btn) {
+    btn.onclick = async () => {
+      state = await api("/api/select_star", {
+        method: "POST",
+        body: JSON.stringify({ seed: Number(c.seed) }),
+      });
+      selectedUnitId = null;
+      selectedBodyId = null;
+      selectedDossierSeed = null;
+      render();
+    };
+  }
 }
 
 function renderFleet() {
