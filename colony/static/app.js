@@ -904,10 +904,11 @@ function arkCascadeSurveyHtml() {
 
 function arkCascadeFabHtml() {
   const builds = state.builds || [];
+  const busy = builds.length > 0;
   let queueHtml;
   if (!builds.length) {
     queueHtml =
-      '<div class="queue-empty">Fabrication bay idle. Authorize a construction job below.</div>';
+      '<div class="queue-empty">Fabrication bay idle — one job at a time. Authorize construction below.</div>';
   } else {
     queueHtml = builds
       .map((j) => {
@@ -917,9 +918,9 @@ function arkCascadeFabHtml() {
         const deploy = j.deploy_body_id
           ? ` · deploy @ ${bodyById(j.deploy_body_id)?.name || j.deploy_body_id}`
           : "";
-        return `<div class="queue-job">
+        return `<div class="queue-job next">
           <div class="title">${j.name}</div>
-          <div class="meta">In bay · ${left.toFixed(1)} mo of ${total.toFixed(1)} mo${deploy} · warp to advance</div>
+          <div class="meta">Bay occupied · ${left.toFixed(1)} mo of ${total.toFixed(1)} mo${deploy} · warp to finish</div>
           <div class="queue-bar"><i style="width:${done.toFixed(1)}%"></i></div>
         </div>`;
       })
@@ -939,7 +940,9 @@ function arkCascadeFabHtml() {
         <h3>${s.name}</h3>
         <p>${s.description || ""}</p>
         <p class="muted">${cost} · ${s.months} mo in bay${dv}</p>
-        <button type="button" class="primary" data-build="${s.id}">Queue on ark</button>
+        <button type="button" class="primary" data-build="${s.id}" ${busy ? "disabled" : ""}>
+          ${busy ? "Bay busy" : "Build in bay"}
+        </button>
       </div>`;
     })
     .join("");
@@ -955,12 +958,12 @@ function arkCascadeFabHtml() {
         <p>${s.description || ""}</p>
         <p class="muted">${cost} · ${s.months} mo · deploys to a body</p>
         <label>Deploy on
-          <select data-struct-dest="${s.id}">${bodyPickerOptions(
+          <select data-struct-dest="${s.id}" ${busy ? "disabled" : ""}>${bodyPickerOptions(
             selectedBodyId || state.home_body_id || ""
           )}</select>
         </label>
-        <button type="button" class="primary" data-struct="${s.id}" style="margin-top:8px;width:100%">
-          Queue depot
+        <button type="button" class="primary" data-struct="${s.id}" style="margin-top:8px;width:100%" ${busy ? "disabled" : ""}>
+          ${busy ? "Bay busy" : "Build in bay"}
         </button>
       </div>`;
     })
@@ -968,9 +971,10 @@ function arkCascadeFabHtml() {
 
   return `
     <p class="cascade-section-lead">
-      Materials-only arrival: authorize fleet units (with fixed Δv tanks) or site structures like refueling depots.
+      One fabrication bay — only <strong>one job at a time</strong>. Finish (warp) the current job before authorizing the next.
+      Units launch with fixed Δv tanks; structures like refueling depots deploy to a body.
     </p>
-    <h2>Bay queue</h2>
+    <h2>Bay (single berth)</h2>
     <div class="queue-list">${queueHtml}</div>
     <h2>Fleet units</h2>
     <div class="cascade-grid">${cards}</div>

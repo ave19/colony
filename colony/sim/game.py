@@ -544,6 +544,7 @@ class Game:
         return tree
 
     def _tick_builds(self, months: float) -> None:
+        # Single bay: only the head job advances.
         for job in list(self.build_queue):
             if job.status != "building":
                 continue
@@ -552,6 +553,7 @@ class Game:
                 job.months_left = 0.0
                 job.status = "complete"
                 self._finish_build(job)
+            break
         self.build_queue = [j for j in self.build_queue if j.status == "building"]
 
     def _finish_build(self, job: BuildJob) -> None:
@@ -601,12 +603,22 @@ class Game:
         )
 
     def queue_build(self, unit_kind: str, deploy_body_id: str = "") -> dict:
-        """Authorize ark to build a unit or structure from seed materials + time."""
+        """Authorize ark to build a unit or structure from seed materials + time.
+
+        The fabrication bay runs **one job at a time** — no parallel queue.
+        """
         self.catch_up()
         if self.phase != "system":
             raise ValueError("can only build after arrival")
         if not any(u.kind == "ark" for u in self.fleet.values()):
             raise ValueError("no ark")
+        active = [j for j in self.build_queue if j.status == "building"]
+        if active:
+            job = active[0]
+            raise ValueError(
+                f"fabrication bay busy: {job.name} "
+                f"({job.months_left:.1f} mo left) — warp or wait until complete"
+            )
 
         unit_spec = UNIT_BUILDS.get(unit_kind)
         struct_spec = STRUCTURE_BUILDS.get(unit_kind)

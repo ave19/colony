@@ -380,20 +380,33 @@ def test_build_refuel_depot_and_refuel_there():
     assert sat.dv_remaining_m_s > 100.0
 
 
+def test_fab_bay_one_job_at_a_time():
+    g = Game(universe_seed=70)
+    _arrive(g)
+    g.queue_build("survey")
+    assert len(g.build_queue) == 1
+    try:
+        g.queue_build("miner")
+        assert False, "second job should be rejected while bay busy"
+    except ValueError as e:
+        assert "busy" in str(e).lower()
+    while any(j.status == "building" for j in g.build_queue):
+        g.warp_to_next_event(force=True)
+    # Bay free again
+    g.queue_build("miner")
+    assert len(g.build_queue) == 1
+
+
 def test_mine_then_haul_ore_to_ark():
     g = Game(universe_seed=22)
     _arrive(g)
-    g.queue_build("survey")
-    g.queue_build("miner")
-    g.queue_build("hauler")
-    for _ in range(40):
-        if (
-            any(u.kind == "survey" for u in g.fleet.values())
-            and any(u.kind == "miner" for u in g.fleet.values())
-            and any(u.kind == "hauler" for u in g.fleet.values())
-        ):
-            break
-        g.warp_to_next_event(force=True)
+    for kind in ("survey", "miner", "hauler"):
+        g.queue_build(kind)
+        while any(j.status == "building" for j in g.build_queue):
+            g.warp_to_next_event(force=True)
+    assert any(u.kind == "survey" for u in g.fleet.values())
+    assert any(u.kind == "miner" for u in g.fleet.values())
+    assert any(u.kind == "hauler" for u in g.fleet.values())
     sat = next(u for u in g.fleet.values() if u.kind == "survey")
     miner = next(u for u in g.fleet.values() if u.kind == "miner")
     hauler = next(u for u in g.fleet.values() if u.kind == "hauler")
