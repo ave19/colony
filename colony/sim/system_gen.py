@@ -424,6 +424,8 @@ def generate_system(seed: Optional[int] = None, star_type_id: Optional[str] = No
         star_name = rng.choice(STAR_PROPER_NAMES)
         star["name"] = star_name
         star["designation"] = f"{star_name} ({star['spectral']})"
+        # Rough [Fe/H]-like metallicity scatter (solar = 1.0); affects rock metals
+        star["metallicity"] = max(0.4, min(1.8, rng.gauss(1.0, 0.18)))
 
         # Scale orbital architecture with stellar mass (a ∝ M^{1/3} weak; we use √M for spacing feel)
         m = star["mass"]
@@ -467,9 +469,9 @@ def generate_system(seed: Optional[int] = None, star_type_id: Optional[str] = No
         planet_slots = filtered
 
         for i, (au, role) in enumerate(planet_slots):
-            body = _make_planet(rng, i, au, role, snow, hz_in, hz_out, star_name)
+            body = _make_planet(rng, i, au, role, snow, hz_in, hz_out, star_name, star["metallicity"])
             bodies.append(body)
-            bodies.extend(_make_moons(rng, body, au, snow))
+            bodies.extend(_make_moons(rng, body, au, snow, star["metallicity"]))
 
         # Asteroid belt near snow line (or between rock and gas)
         rocks_au = [b.semi_major_m / AU_M for b in bodies if b.planet_class == "rocky"]
@@ -480,7 +482,7 @@ def generate_system(seed: Optional[int] = None, star_type_id: Optional[str] = No
             belt_au = snow * rng.uniform(0.95, 1.1)
         for a in range(rng.randint(4, 7)):
             au = belt_au * rng.uniform(0.93, 1.07)
-            bodies.append(_make_asteroid(rng, a, au, snow, star_name))
+            bodies.append(_make_asteroid(rng, a, au, snow, star_name, star["metallicity"]))
 
         if _reject_trap(bodies):
             continue
@@ -513,6 +515,7 @@ def _make_planet(
     hz_in: float,
     hz_out: float,
     star_name: str,
+    star_metallicity: float = 1.0,
 ) -> Body:
     if role == "gas_giant":
         mass = rng.uniform(50, 320) * EARTH_MASS  # ~0.15–1 MJup
@@ -556,7 +559,10 @@ def _make_planet(
         phase0=rng.uniform(0, 2 * math.pi),
         has_atmosphere=atmo,
         atmosphere_note=note,
-        deposits=_deposits_for(rng, au, snow, pclass, ice, metal),
+        deposits=_deposits_for(
+            rng, au, snow, pclass, ice, metal,
+            body_mass_kg=mass, star_metallicity=star_metallicity,
+        ),
         density_hint=dens,
         ice_likely=ice,
         metal_likely=metal,
@@ -564,7 +570,9 @@ def _make_planet(
     )
 
 
-def _make_moons(rng: random.Random, planet: Body, au: float, snow: float) -> List[Body]:
+def _make_moons(
+    rng: random.Random, planet: Body, au: float, snow: float, star_metallicity: float = 1.0
+) -> List[Body]:
     moons: List[Body] = []
     if planet.planet_class == "gas_giant":
         n = rng.randint(3, 5)
@@ -600,7 +608,10 @@ def _make_moons(rng: random.Random, planet: Body, au: float, snow: float) -> Lis
                 phase0=rng.uniform(0, 2 * math.pi),
                 has_atmosphere=rng.random() < 0.08 and moon_ice,
                 atmosphere_note="tenuous" if moon_ice else "",
-                deposits=_deposits_for(rng, au, snow, "moon", moon_ice, moon_metal),
+                deposits=_deposits_for(
+                    rng, au, snow, "moon", moon_ice, moon_metal,
+                    body_mass_kg=m_mass, star_metallicity=star_metallicity,
+                ),
                 density_hint="icy" if moon_ice else ("dense" if moon_metal else "rocky"),
                 ice_likely=moon_ice,
                 metal_likely=moon_metal,
@@ -610,22 +621,59 @@ def _make_moons(rng: random.Random, planet: Body, au: float, snow: float) -> Lis
     return moons
 
 
-def _make_asteroid(rng: random.Random, a: int, au: float, snow: float, star_name: str) -> Body:
+def _make_asteroid(
+    rng: random.Random, a: int, au: float, snow: float, star_name: str, star_metallicity: float = 1.0
+) -> Body:
+    # Taxonomic family from heliocentric distance (formation + thermal processing)
+    # Inner / mid belt: more S/M; beyond snow line: C/D + ice.
+    roll = rng.random()
+    if au < snow * 0.85:
+        family = "M" if roll < 0.22 else ("S" if roll < 0.75 else "C")
+    elif au < snow * 1.15:
+        family = "S" if roll < 0.35 else ("C" if roll < 0.8 else "M")
+    else:
+        family = "C" if roll < 0.55 else ("D" if roll < 0.9 else "M")
+
+    mass = rng.uniform(1e15, 5e18)
+    radius = rng.uniform(5e3, 1.2e5)
+    metal = family == "M"
+    ice = family in ("C", "D") or au > snow * 0.95
+    dens = {
+        "M": "metallic (M-type)",
+        "S": "stony (S-type)",
+        "C": "carbonaceous (C-type)",
+        "D": "primitive / icy (D-type)",
+    }[family]
+
     return Body(
         id=f"a{a}",
         name=f"{star_name} Belt-{a + 1}",
         kind="asteroid",
         parent_id="star",
-        mass_kg=rng.uniform(1e15, 5e18),
-        radius_m=rng.uniform(5e3, 1.2e5),
+        mass_kg=mass,
+        radius_m=radius,
         semi_major_m=au * AU_M,
         phase0=rng.uniform(0, 2 * math.pi),
-        deposits=_deposits_for(rng, au, snow, "asteroid", au > snow * 0.9, rng.random() < 0.5),
-        density_hint="metallic" if rng.random() < 0.4 else "stony",
-        ice_likely=au > snow * 0.9,
-        metal_likely=rng.random() < 0.5,
+        deposits=_deposits_for(
+            rng, au, snow, "asteroid", ice_likely=ice, metal_likely=metal,
+            body_mass_kg=mass, asteroid_family=family, star_metallicity=star_metallicity,
+        ),
+        density_hint=dens,
+        ice_likely=ice,
+        metal_likely=metal,
         planet_class="asteroid",
     )
+
+
+def _crust_mass_t(body_mass_kg: float, fraction: float = 3e-4) -> float:
+    """
+    Order-of-magnitude accessible crust/regolith budget (tonnes).
+    Not whole-planet mass — only a thin mineable shell / ISRU-accessible layer.
+    Earth mass ~6e21 t; fraction ~3e-4 → ~2e18 t total crust-ish; we use much
+    smaller effective industrial budgets per resource via further fractions.
+    """
+    body_t = body_mass_kg / 1000.0
+    return max(1e3, body_t * fraction)
 
 
 def _deposits_for(
@@ -635,33 +683,143 @@ def _deposits_for(
     pkind: str,
     ice_likely: bool = False,
     metal_likely: bool = False,
+    body_mass_kg: float = EARTH_MASS,
+    asteroid_family: str = "",
+    star_metallicity: float = 1.0,  # 1 = solar Z; scales metal availability
 ) -> List[Deposit]:
+    """
+    Formation-linked resource priors (playable, not a full geochem sim).
+
+    Rules of thumb encoded:
+    - Inside snow line: dry rock, silicates + metals; little free ice/CH4
+    - Beyond snow line: water ice / organics / CH4 more common
+    - Gas/ice giant *planets*: no surface mines — atmosphere/envelope volatiles only
+      (real digging happens on moons)
+    - Asteroid family M/S/C/D changes metal vs carbon vs ice mix
+    - Accessible tonnage scales with body mass (crust budget), not pure RNG ranges
+    - Stellar metallicity boosts rock metals; volatiles less so
+    """
     deps: List[Deposit] = []
+    z = max(0.3, min(2.0, star_metallicity))
+    crust = _crust_mass_t(body_mass_kg)
+    dry = au < snow * 0.9
+    wet = au > snow * 0.95 or ice_likely
 
-    def add(res: str, p: float, amount: Tuple[float, float], grade: Tuple[float, float] = (0.3, 0.95)):
-        if rng.random() < p:
-            deps.append(Deposit(res, rng.uniform(*grade), rng.uniform(*amount), False))
+    def add(res: str, p: float, mass_frac: float, grade: Tuple[float, float], force: bool = False):
+        """mass_frac = fraction of accessible crust budget for this resource at this site pool."""
+        p = min(0.98, p)
+        if force or rng.random() < p:
+            # grade: ore quality / concentration
+            g = rng.uniform(*grade)
+            # available tonnes for industry (site-level pool before splitting into mine sites)
+            amt = crust * mass_frac * g * rng.uniform(0.4, 1.2)
+            amt = max(10.0, amt)
+            deps.append(Deposit(res, g, amt, False))
 
-    if pkind in ("rocky", "moon", "asteroid"):
-        add("Fe", 0.75 if metal_likely or pkind == "asteroid" else 0.4, (5e4, 5e6))
-        add("Al", 0.45, (1e4, 1e6))
-        add("Si", 0.8, (1e5, 8e6))
-        add("Cu", 0.2, (500, 5e4))
-        add("U", 0.08, (50, 5e3))
-        add("Li", 0.12, (100, 2e4))
-        add("MAG", 0.1, (20, 2e3))
-    if ice_likely or au > snow * 0.75 or pkind in ("ice_giant", "gas_giant", "moon"):
-        add("H2O", 0.85, (1e5, 1e8))
-    if pkind in ("gas_giant", "ice_giant") or (pkind == "moon" and ice_likely):
-        add("CH4", 0.55, (1e4, 5e7))
-        add("He", 0.25, (100, 1e5))
-        add("Ar", 0.3, (500, 1e5))
-        add("Xe", 0.12, (10, 5e3))
-    if pkind == "asteroid" and au > snow:
-        add("H2O", 0.5, (1e3, 1e6))
-    if pkind == "rocky" and au < snow:
-        add("N", 0.25, (1e3, 5e5))
+    # --- Gas / ice giant PLANETS: envelope volatiles only (no Fe mines on Jupiter) ---
+    if pkind in ("gas_giant", "ice_giant"):
+        env = max(1e8, body_mass_kg / 1000.0 * 1e-6)
+
+        def add_env(res: str, p: float, frac_lo: float, frac_hi: float, grade: Tuple[float, float], force: bool = False):
+            if force or rng.random() < p:
+                deps.append(
+                    Deposit(res, rng.uniform(*grade), env * rng.uniform(frac_lo, frac_hi), False)
+                )
+
+        add_env("H2O", 0.75 if pkind == "ice_giant" else 0.35, 1e-4, 1e-3, (0.3, 0.7), force=pkind == "ice_giant")
+        add_env("CH4", 0.9 if pkind == "ice_giant" else 0.55, 5e-5, 8e-4, (0.35, 0.9))
+        add_env("He", 0.95, 1e-5, 2e-4, (0.4, 0.95), force=True)
+        add_env("Ar", 0.5, 1e-6, 5e-5, (0.3, 0.8))
+        add_env("Xe", 0.28 if pkind == "ice_giant" else 0.12, 1e-8, 5e-7, (0.2, 0.7))
+        return _filter_book_resources(deps)
+
+    # --- Asteroids by family ---
+    if pkind == "asteroid":
+        fam = asteroid_family or ("M" if metal_likely else ("C" if wet else "S"))
+        if fam == "M":
+            add("Fe", 0.98, 0.12 * z, (0.55, 0.95), force=True)
+            add("Si", 0.5, 0.03, (0.25, 0.55))
+            add("Cu", 0.35 * z, 0.001 * z, (0.25, 0.6))
+            add("MAG", 0.35 * z, 0.0002 * z, (0.2, 0.6))
+            add("U", 0.08 * z, 1e-6 * z, (0.15, 0.45))
+        elif fam == "S":
+            add("Si", 0.95, 0.08, (0.4, 0.85), force=True)
+            add("Fe", 0.7 * z, 0.04 * z, (0.35, 0.75))
+            add("Al", 0.55, 0.02, (0.3, 0.65))
+            add("Cu", 0.2 * z, 0.0005 * z, (0.2, 0.5))
+            add("Li", 0.12, 0.0001, (0.2, 0.55))
+        elif fam in ("C", "D"):
+            add("Si", 0.7, 0.04, (0.25, 0.6))
+            add("Fe", 0.35 * z, 0.015 * z, (0.2, 0.5))
+            add("H2O", 0.85 if wet or fam == "D" else 0.45, 0.06, (0.4, 0.9), force=wet)
+            add("CH4", 0.35 if wet else 0.1, 0.008, (0.25, 0.7))
+            add("C", 0.55, 0.02, (0.3, 0.7))
+            add("N", 0.2, 0.001, (0.15, 0.45))
+        return _filter_book_resources(deps)
+
+    # --- Rocky planets ---
+    if pkind == "rocky":
+        # Differentiated rock: silicates ubiquitous; Fe more if metal_likely (smaller/stripped or Fe-rich)
+        metal_boost = 1.35 if metal_likely else 1.0
+        # Inner dry worlds: less hydration
+        add("Si", 0.98, 0.06, (0.45, 0.9), force=True)
+        # Almost all rocky worlds have some Fe; metal_likely raises grade/fraction
+        add("Fe", min(0.97, 0.7 * metal_boost * z), 0.025 * metal_boost * z, (0.3, 0.85), force=True)
+        add("Al", 0.85, 0.015, (0.35, 0.75), force=True)
+        add("Cu", 0.25 * z, 0.0003 * z, (0.2, 0.55))
+        add("U", 0.12 * z, 2e-6 * z, (0.15, 0.5))
+        add("Li", 0.15, 8e-5, (0.2, 0.55))
+        add("MAG", 0.1 * z, 5e-5 * z, (0.15, 0.5))
+        if dry:
+            add("H2O", 0.15, 0.002, (0.15, 0.45))  # rare hydrated minerals / polar ice
+            add("N", 0.35, 0.0008, (0.2, 0.6))  # atmosphere / nitrate chance
+        else:
+            add("H2O", 0.7, 0.03, (0.35, 0.85))
+            add("CH4", 0.2, 0.002, (0.2, 0.55))
+            add("N", 0.25, 0.0005, (0.2, 0.5))
+        return _filter_book_resources(deps)
+
+    # --- Moons: depend on heliocentric distance + ice flag ---
+    if pkind == "moon":
+        if wet or ice_likely:
+            # Icy moons (Europa/Titan/Enceladus-like mix)
+            add("H2O", 0.95, 0.12, (0.5, 0.95), force=True)
+            add("CH4", 0.45, 0.015, (0.3, 0.8))
+            add("Si", 0.55, 0.02, (0.25, 0.6))  # rocky core material at surface sometimes
+            add("Fe", 0.25 * z, 0.008 * z, (0.2, 0.55))
+            add("N", 0.3, 0.002, (0.2, 0.55))  # Titan-like
+            add("Ar", 0.15, 0.0002, (0.2, 0.5))
+            add("Xe", 0.08, 1e-5, (0.15, 0.45))
+        else:
+            # Rocky moons (Luna-like)
+            add("Si", 0.95, 0.05, (0.4, 0.85), force=True)
+            add("Fe", 0.6 * z, 0.02 * z, (0.3, 0.75))
+            add("Al", 0.65, 0.012, (0.3, 0.7))
+            add("H2O", 0.2, 0.003, (0.15, 0.45))  # polar ice chance
+            add("Cu", 0.12 * z, 0.0002 * z, (0.15, 0.45))
+        return _filter_book_resources(deps)
+
     return deps
+
+
+def _filter_book_resources(deps: List[Deposit]) -> List[Deposit]:
+    """Keep only resources the v1 tech book understands (+ drop empty)."""
+    book = {
+        "Fe", "Al", "Si", "H2O", "CH4", "O2", "H", "O", "N", "C",
+        "Cu", "U", "Xe", "Ar", "Li", "MAG", "He",
+    }
+    # merge duplicates of same resource (sum amounts, max grade)
+    merged: Dict[str, Deposit] = {}
+    for d in deps:
+        if d.resource not in book:
+            continue
+        if d.resource in merged:
+            m = merged[d.resource]
+            m.amount_t += d.amount_t
+            m.grade = max(m.grade, d.grade)
+        else:
+            merged[d.resource] = Deposit(d.resource, d.grade, d.amount_t, False)
+    return list(merged.values())
 
 
 def _difficulty(star: dict, bodies: List[Body], snow: float) -> float:
