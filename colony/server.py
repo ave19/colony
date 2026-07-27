@@ -187,6 +187,27 @@ def start_haul(body: StartHaulBody):
         raise HTTPException(400, str(e)) from e
 
 
+class MassLaunchBody(BaseModel):
+    origin_id: str
+    dest_id: str = "ark"
+    resource: str
+    amount_t: float = Field(gt=0)
+
+
+@app.post("/api/mass_launch")
+def mass_launch(body: MassLaunchBody):
+    """Shoot cargo off a mass-driver body (no hauler, no chemical ascent)."""
+    try:
+        return room().mass_launch(
+            body.origin_id,
+            body.dest_id,
+            body.resource,
+            body.amount_t,
+        )
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/api/stocks")
 def stocks(body: HaulOptionsBody):
     """Stockpile at a location (reuse origin_id field)."""

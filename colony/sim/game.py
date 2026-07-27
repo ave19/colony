@@ -19,6 +19,7 @@ from .system_gen import StarSystem, build_survey_archive, generate_system
 from .tech import (
     BUILDINGS,
     HAB_OPTIONS,
+    MASS_DRIVER_MAX_SURFACE_DV_M_S,
     POWER_OPTIONS,
     RECIPES,
     RESOURCE_NAMES,
@@ -27,6 +28,7 @@ from .tech import (
     expand_base_plan,
     tech_book_summary,
 )
+from .orbits import dv_surface_to_orbit
 
 
 def _id() -> str:
@@ -571,15 +573,12 @@ class Game:
                 site.stockpile["chem_prop"] = site.stockpile.get("chem_prop", 0.0) + 25.0
             body = self.system.body_by_id(body_id) if self.system else None
             where = body.name if body else body_id
-            self._log(
-                "build",
-                f"Deployed {job.name} at {where}."
-                + (
-                    " Units can refuel Δv here."
-                    if job.building_id == "refuel_depot"
-                    else ""
-                ),
-            )
+            extra = ""
+            if job.building_id == "refuel_depot":
+                extra = " Units can refuel Δv here."
+            elif job.building_id == "mass_driver":
+                extra = " Cargo can launch without chemical ascent; bots get lift assist."
+            self._log("build", f"Deployed {job.name} at {where}.{extra}")
             return
 
         self._unit_seq[job.unit_kind] = self._unit_seq.get(job.unit_kind, 0) + 1
@@ -635,10 +634,20 @@ class Game:
             body_id = deploy_body_id or self.home_body_id
             if not body_id or not self.system or not self.system.body_by_id(body_id):
                 raise ValueError("pick a body to deploy the structure on")
-            # One depot per body is enough for v1
+            body = self.system.body_by_id(body_id)
+            # One of each structure type per body
             site = self.sites.get(body_id)
             if site and spec.get("building") in site.buildings:
                 raise ValueError("that body already has this structure")
+            # Mass drivers only on light gravity wells
+            if spec.get("building") == "mass_driver":
+                if not self.body_allows_mass_driver(body):
+                    dv = dv_surface_to_orbit(body.mass_kg, body.radius_m)
+                    raise ValueError(
+                        f"{body.name} well is too deep for a mass driver "
+                        f"(surface→orbit ~{dv:.0f} m/s; need ≤{MASS_DRIVER_MAX_SURFACE_DV_M_S:.0f} "
+                        f"or an asteroid/moon-class light body)"
+                    )
 
         for res, need in spec["cost"].items():
             have = self.ark_stock.get(res, 0.0)
@@ -912,6 +921,28 @@ class Game:
             capabilities=[CAP_COMMAND, CAP_BUILD, CAP_HAUL],
         )
 
+    def body_allows_mass_driver(self, body) -> bool:
+        """Railguns only work on light wells (asteroids, most moons, small rock worlds)."""
+        if body is None:
+            return False
+        if body.kind == "asteroid":
+            return True
+        if body.kind == "moon":
+            return (
+                dv_surface_to_orbit(body.mass_kg, body.radius_m)
+                <= MASS_DRIVER_MAX_SURFACE_DV_M_S * 1.15
+            )
+        if body.kind == "planet" and body.planet_class == "rocky":
+            return (
+                dv_surface_to_orbit(body.mass_kg, body.radius_m)
+                <= MASS_DRIVER_MAX_SURFACE_DV_M_S
+            )
+        return False  # gas giants, ice giants, etc.
+
+    def _has_building(self, body_id: str, building_id: str) -> bool:
+        site = self.sites.get(body_id)
+        return bool(site and building_id in site.buildings)
+
     def _heliocentric_radius_m(self, body_id: str) -> float:
         """Orbital radius about the star for travel planning (moons use parent planet)."""
         assert self.system
@@ -962,6 +993,9 @@ class Game:
                 base = 420.0
             elif fb.kind != tb.kind:
                 base = 350.0
+            # Mass driver on the departure body: EM assist for bots/probes leaving surface
+            if fb and self._has_building(from_id, "mass_driver"):
+                base *= 0.25
             return base
 
         r1 = self._heliocentric_radius_m(from_id)
@@ -974,10 +1008,16 @@ class Game:
         # as "tank units" so outer system is expensive but not a single-hop brick wall.
         # Far transfers still cost more; return-to-ark / depots matter for campaigns.
         if unit_kind == "survey":
-            return max(200.0, dv_h * 0.22)
-        if unit_kind == "miner":
-            return max(250.0, dv_h * 0.28)
-        return max(300.0, dv_h * 0.35)
+            cost = max(200.0, dv_h * 0.22)
+        elif unit_kind == "miner":
+            cost = max(250.0, dv_h * 0.28)
+        else:
+            cost = max(300.0, dv_h * 0.35)
+        # Rail launch from a light body shaves the surface-lift share of the budget
+        if fb and self._has_building(from_id, "mass_driver"):
+            assist = min(cost * 0.35, 800.0)
+            cost = max(150.0, cost - assist)
+        return cost
 
     def _travel_months(self, from_id: str, to_id: str, unit_kind: str = "hauler") -> float:
         """
@@ -1552,27 +1592,125 @@ class Game:
     # --- hauls ---
     def haul_options(self, origin_id: str, dest_id: str) -> List[dict]:
         """
-        Ark/orbital haulers start in space. Cost ≈ interplanetary Hohmann
-        + a partial destination landing burn (surface well still matters).
-        Hauler dry mass kept modest so seed chem_prop can close early loops.
+        Transfer menu: interplanetary Hohmann + surface legs.
+        - Leaving a surface stockpile costs ascent Δv *unless* a mass driver is online
+          (railguns replace chemical ascent on light bodies).
+        - Arriving at a body costs a partial landing burn.
         """
         assert self.system
         o = self._radius_of(origin_id)
         d = self._radius_of(dest_id)
         extra = 0.0
-        dest = self.system.body_by_id(dest_id)
-        if dest and dest.kind in ("planet", "moon", "asteroid"):
-            from .orbits import dv_surface_to_orbit
+        notes: List[str] = []
 
+        origin_body = None
+        if origin_id not in ("ark", "ark_orbit"):
+            origin_body = self.system.body_by_id(origin_id)
+        if origin_body and origin_body.kind in ("planet", "moon", "asteroid"):
+            ascent = 0.45 * dv_surface_to_orbit(origin_body.mass_kg, origin_body.radius_m)
+            if self._has_building(origin_id, "mass_driver"):
+                notes.append("mass driver ascent (railgun — no chemical lift)")
+                # EM launch: negligible propellant; tiny residual for catch/rendezvous
+                extra += min(80.0, ascent * 0.05)
+            else:
+                notes.append(f"chemical ascent ~{ascent:.0f} m/s")
+                extra += ascent
+
+        dest = self.system.body_by_id(dest_id) if dest_id not in ("ark", "ark_orbit") else None
+        if dest and dest.kind in ("planet", "moon", "asteroid"):
             # Landing / surface delivery leg (not full SSTO both ways)
-            extra += 0.35 * dv_surface_to_orbit(dest.mass_kg, dest.radius_m)
+            land = 0.35 * dv_surface_to_orbit(dest.mass_kg, dest.radius_m)
+            extra += land
+            notes.append(f"landing ~{land:.0f} m/s")
+
         # Avoid identical radii (same orbit) — tiny hop
         if abs(o - d) / max(o, d) < 0.02:
             o *= 0.98
         opts = transfer_options(
             o, d, self.system.star_mu, ship_dry_mass_t=8.0, extra_dv_m_s=extra, isp_s=340.0
         )
-        return [x.to_dict() for x in opts]
+        out = []
+        for x in opts:
+            dopt = x.to_dict()
+            if notes:
+                dopt["description"] = (dopt.get("description") or "") + " · " + "; ".join(notes)
+            dopt["mass_driver_ascent"] = bool(
+                origin_body and self._has_building(origin_id, "mass_driver")
+            )
+            out.append(dopt)
+        return out
+
+    def mass_launch(
+        self,
+        origin_id: str,
+        dest_id: str,
+        resource: str,
+        amount_t: float,
+    ) -> dict:
+        """
+        Fire cargo off a mass-driver body without a hauler or chemical ascent.
+        Packet rides a Hohmann-class coast to dest (ark or body stockpile).
+        """
+        self.catch_up()
+        if self.phase != "system":
+            raise ValueError("only after arrival")
+        if origin_id in ("ark", "ark_orbit"):
+            raise ValueError("mass driver is a surface launcher — pick a body origin")
+        body = self.system.body_by_id(origin_id) if self.system else None
+        if not body:
+            raise ValueError("unknown origin body")
+        if not self._has_building(origin_id, "mass_driver"):
+            raise ValueError(f"no mass driver on {body.name} — build one first")
+        if not self.body_allows_mass_driver(body):
+            raise ValueError(f"{body.name} is too deep a well for mass-driver launch")
+        if dest_id in ("ark_orbit",):
+            dest_id = "ark"
+        if origin_id == dest_id:
+            raise ValueError("origin and destination must differ")
+
+        stock = self._stock_for(origin_id)
+        if stock.get(resource, 0.0) + 1e-9 < amount_t:
+            raise ValueError(
+                f"insufficient {RESOURCE_NAMES.get(resource, resource)} "
+                f"(have {stock.get(resource, 0.0):.1f} t)"
+            )
+        # Time of flight ≈ economy transfer (no propellant)
+        from .orbits import hohmann_transfer
+        from .constants import DAYS_PER_MONTH, SECONDS_PER_DAY
+
+        r1 = self._radius_of(origin_id)
+        r2 = self._radius_of(dest_id)
+        if abs(r1 - r2) / max(r1, r2) < 0.02:
+            r1 *= 0.98
+        _dv, tof_s = hohmann_transfer(r1, r2, self.system.star_mu)
+        months = max(0.5, tof_s / (SECONDS_PER_DAY * DAYS_PER_MONTH))
+        # Mass-driver packets are slightly slower (release windows / catch)
+        months *= 1.1
+
+        stock[resource] -= amount_t
+        hid = _id()
+        self.hauls[hid] = Haul(
+            id=hid,
+            origin_id=origin_id,
+            dest_id=dest_id,
+            resource=resource,
+            amount_t=amount_t,
+            option_name="Mass driver launch",
+            propellant_t=0.0,
+            months_total=months,
+            months_left=months,
+            dv_m_s=_dv,
+            unit_id="",
+            contract_id=None,
+        )
+        dest_label = self._location_label(dest_id)
+        res_name = RESOURCE_NAMES.get(resource, resource)
+        self._log(
+            "haul",
+            f"Mass driver @ {body.name}: shot {amount_t:.1f} t {res_name} → {dest_label} "
+            f"({months:.1f} mo coast, 0 t chem_prop).",
+        )
+        return self.snapshot()
 
     def _radius_of(self, body_id: str) -> float:
         assert self.system
@@ -1895,14 +2033,18 @@ class Game:
             for b in data["system"].get("bodies", []):
                 b["hab_intel"] = self.hab_intel.get(b["id"], 0)
                 site = self.sites.get(b["id"])
+                full_body = self.system.body_by_id(b["id"])
+                b["mass_driver_ok"] = self.body_allows_mass_driver(full_body)
                 if site:
                     b["site_stockpile"] = {
                         k: round(v, 2) for k, v in site.stockpile.items() if v > 1e-6
                     }
                     b["site_buildings"] = list(site.buildings)
+                    b["has_mass_driver"] = "mass_driver" in site.buildings
                 else:
                     b["site_stockpile"] = {}
                     b["site_buildings"] = []
+                    b["has_mass_driver"] = False
         return data
 
 

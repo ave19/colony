@@ -111,6 +111,13 @@ BUILDINGS = {
         "Stores propellant and refills unit Δv budgets. Seed stock of chem_prop on deploy.",
         ["refuel"],
     ),
+    "mass_driver": BuildingType(
+        "mass_driver",
+        "Mass driver (railgun)",
+        {"steel": 90, "chip": 8, "Al": 40, "panel": 20},
+        "Electromagnetic launcher for light worlds. Shoots cargo (and assists bots) off the surface without chemical ascent.",
+        ["mass_launch"],
+    ),
 }
 
 
@@ -319,7 +326,21 @@ STRUCTURE_BUILDS = {
         "months": 3.0,
         "description": "Propellant store on a body. Units that dock here refill Δv (uses depot chem_prop stock).",
     },
+    "mass_driver": {
+        "id": "mass_driver",
+        "name": "Mass driver (railgun)",
+        "kind": "structure",
+        "building": "mass_driver",
+        "cost": {"steel": 90.0, "chip": 8.0, "Al": 40.0, "panel": 20.0},
+        "months": 4.0,
+        "description": "Railgun launcher for asteroids, moons, and other light wells. "
+        "Shoots ore off the surface (no chemical ascent) and assists bots leaving the body. "
+        "Won't work on deep gravity wells.",
+    },
 }
+
+# Surface-to-orbit Δv above this: mass driver is not practical (game threshold).
+MASS_DRIVER_MAX_SURFACE_DV_M_S = 2800.0
 
 
 def tech_book_summary() -> dict:

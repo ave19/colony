@@ -948,19 +948,35 @@ function arkCascadeFabHtml() {
     .join("");
 
   const structs = state.structure_builds || {};
+  const bodies = (state.system && state.system.bodies) || [];
   const structCards = Object.values(structs)
     .map((s) => {
       const cost = Object.entries(s.cost || {})
         .map(([k, v]) => `${v} t ${k}`)
         .join(", ");
+      // Mass driver: only list light-well bodies
+      let destOpts;
+      if (s.id === "mass_driver") {
+        const light = bodies.filter((b) => b.mass_driver_ok);
+        destOpts = light.length
+          ? light
+              .map(
+                (b) =>
+                  `<option value="${b.id}" ${
+                    b.id === selectedBodyId ? "selected" : ""
+                  }>${b.name} (↑${b.dv_to_orbit_m_s} m/s)</option>`
+              )
+              .join("")
+          : `<option value="">No light bodies available</option>`;
+      } else {
+        destOpts = bodyPickerOptions(selectedBodyId || state.home_body_id || "");
+      }
       return `<div class="card">
         <h3>${s.name}</h3>
         <p>${s.description || ""}</p>
         <p class="muted">${cost} · ${s.months} mo · deploys to a body</p>
         <label>Deploy on
-          <select data-struct-dest="${s.id}" ${busy ? "disabled" : ""}>${bodyPickerOptions(
-            selectedBodyId || state.home_body_id || ""
-          )}</select>
+          <select data-struct-dest="${s.id}" ${busy ? "disabled" : ""}>${destOpts}</select>
         </label>
         <button type="button" class="primary" data-struct="${s.id}" style="margin-top:8px;width:100%" ${busy ? "disabled" : ""}>
           ${busy ? "Bay busy" : "Build in bay"}
@@ -972,7 +988,7 @@ function arkCascadeFabHtml() {
   return `
     <p class="cascade-section-lead">
       One fabrication bay — only <strong>one job at a time</strong>. Finish (warp) the current job before authorizing the next.
-      Units launch with fixed Δv tanks; structures like refueling depots deploy to a body.
+      Structures: refuel depots, <strong>mass drivers</strong> (railguns on light moons/asteroids).
     </p>
     <h2>Bay (single berth)</h2>
     <div class="queue-list">${queueHtml}</div>
@@ -1317,12 +1333,52 @@ function renderBodyPanel() {
   }
 
   const stock = b.site_stockpile || {};
+  const stockKeys = Object.keys(stock).filter((k) => stock[k] > 0.05 && k !== "chem_prop");
   const stockLines = Object.keys(stock)
     .sort()
     .map((k) => `· ${k}: ${stock[k]} t`)
     .join("<br/>");
   const bld = (b.site_buildings || []).filter((x) => x && x !== "ark");
   const bldLine = bld.length ? bld.join(", ") : "";
+  const hasDriver = b.has_mass_driver;
+  const driverOk = b.mass_driver_ok;
+  let liftNote = "";
+  if (hasDriver) {
+    liftNote = `<p class="muted" style="color:var(--good)">⚡ Mass driver online — rail launch (no chemical ascent). Bots get lift assist.</p>`;
+  } else if (driverOk) {
+    liftNote = `<p class="muted">Light well (~${b.dv_to_orbit_m_s} m/s ↑orbit) — suitable for a <strong>mass driver</strong> (ark fab).</p>`;
+  } else {
+    liftNote = `<p class="muted">Deep well — mass drivers not practical; use chemical lift / haulers.</p>`;
+  }
+
+  let massLaunchHtml = "";
+  if (hasDriver && stockKeys.length) {
+    massLaunchHtml = `
+      <h2>Mass driver launch</h2>
+      <div class="card">
+        <p class="muted">Shoot surface cargo to orbit path without a hauler or chem_prop.</p>
+        <label>Cargo
+          <select id="md-resource">${stockKeys
+            .map((k) => `<option value="${k}">${k} (${stock[k]} t)</option>`)
+            .join("")}</select>
+        </label>
+        <label>Amount (t)
+          <input id="md-amount" type="number" value="${Math.min(20, stock[stockKeys[0]] || 10)}" min="0.1" step="1" />
+        </label>
+        <label>Destination
+          <select id="md-dest">
+            <option value="ark">Colony Ark</option>
+            ${(state.system.bodies || [])
+              .filter((x) => x.id !== b.id)
+              .map((x) => `<option value="${x.id}">${x.name}</option>`)
+              .join("")}
+          </select>
+        </label>
+        <button type="button" class="primary" id="btn-mass-launch" style="width:100%;margin-top:10px">
+          Fire mass driver
+        </button>
+      </div>`;
+  }
 
   el.innerHTML = `
     <h3>${b.name}</h3>
@@ -1331,6 +1387,7 @@ function renderBodyPanel() {
     <h2>Facts</h2>
     ${orbitFact}
     <p><strong>Δv</strong> ↑orbit ${b.dv_to_orbit_m_s} · esc ${b.dv_escape_from_orbit_m_s} m/s</p>
+    ${liftNote}
     <p><strong>Site search</strong> ${sm.toFixed(1)} mo on station</p>
     <h2>Intel</h2>
     <p>${depLines || '<span class="muted">No composition intel yet</span>'}</p>
@@ -1339,9 +1396,29 @@ function renderBodyPanel() {
     <h2>Surface stockpile</h2>
     <p>${stockLines || '<span class="muted">Empty — mine or deliver here</span>'}</p>
     ${bldLine ? `<p class="muted">Buildings: ${bldLine}</p>` : ""}
+    ${massLaunchHtml}
   `;
   const fb = $("btn-focus-body");
   if (fb) fb.onclick = () => map && map.focusBody(b.id);
+  const fire = $("btn-mass-launch");
+  if (fire) {
+    fire.onclick = async () => {
+      try {
+        state = await api("/api/mass_launch", {
+          method: "POST",
+          body: JSON.stringify({
+            origin_id: b.id,
+            dest_id: $("md-dest").value,
+            resource: $("md-resource").value,
+            amount_t: Math.max(0.1, Number($("md-amount").value) || 1),
+          }),
+        });
+        render();
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 320));
+      }
+    };
+  }
 }
 
 async function renderOrders() {
@@ -1583,9 +1660,10 @@ function renderHaulPanel(opts = {}) {
     const stock = b.site_stockpile || {};
     const keys = Object.keys(stock).filter((k) => stock[k] > 0);
     if (keys.length) {
+      const rail = b.has_mass_driver ? " ⚡rail" : "";
       origins.push({
         id: b.id,
-        label: `${b.name} stockpile (${keys.map((k) => k + " " + stock[k]).join(", ")})`,
+        label: `${b.name} stockpile${rail} (${keys.map((k) => k + " " + stock[k]).join(", ")})`,
       });
     }
   }

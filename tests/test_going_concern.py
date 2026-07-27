@@ -380,6 +380,68 @@ def test_build_refuel_depot_and_refuel_there():
     assert sat.dv_remaining_m_s > 100.0
 
 
+def test_mass_driver_on_light_body_and_launch():
+    g = Game(universe_seed=80)
+    _arrive(g)
+    # Prefer asteroid or small moon
+    body = next(
+        (b for b in g.system.bodies if g.body_allows_mass_driver(b)),
+        None,
+    )
+    assert body is not None, "need a light body for mass driver"
+    g.ark_stock["steel"] = 200
+    g.ark_stock["chip"] = 40
+    g.ark_stock["Al"] = 80
+    g.ark_stock["panel"] = 40
+    g.queue_build("mass_driver", deploy_body_id=body.id)
+    while any(j.status == "building" for j in g.build_queue):
+        g.warp_to_next_event(force=True)
+    assert "mass_driver" in g.sites[body.id].buildings
+
+    # Stock ore and launch to ark without chem_prop
+    g.sites[body.id].stockpile["Fe"] = 40.0
+    # Freeze ark Fe so trickle foundry doesn't hide the delivery
+    g.ark_stock["Fe"] = 0.0
+    g.mass_launch(body.id, "ark", "Fe", 15.0)
+    assert g.sites[body.id].stockpile["Fe"] == 25.0
+    haul = next(h for h in g.hauls.values() if h.option_name == "Mass driver launch")
+    assert haul.propellant_t == 0.0
+    while any(h.status == "in_flight" for h in g.hauls.values()):
+        g.warp_to_next_event(force=True)
+    # Arrived as Fe and/or refined steel via ark trickle
+    arrived = g.ark_stock.get("Fe", 0.0) + g.ark_stock.get("steel", 0.0)
+    assert arrived >= 10.0
+
+    # Deep well should reject if any heavy planet exists
+    heavy = next(
+        (
+            b
+            for b in g.system.bodies
+            if b.kind == "planet" and not g.body_allows_mass_driver(b)
+        ),
+        None,
+    )
+    if heavy:
+        try:
+            g.queue_build("mass_driver", deploy_body_id=heavy.id)
+            assert False, "should reject deep well"
+        except ValueError as e:
+            assert "mass driver" in str(e).lower() or "deep" in str(e).lower() or "well" in str(e).lower()
+
+
+def test_haul_from_mass_driver_cheaper_than_chemical():
+    g = Game(universe_seed=81)
+    _arrive(g)
+    body = next(b for b in g.system.bodies if g.body_allows_mass_driver(b))
+    g.sites.setdefault(body.id, __import__("colony.sim.game", fromlist=["Site"]).Site(body_id=body.id))
+    # Without driver
+    opts_chem = g.haul_options(body.id, "ark")
+    g.sites[body.id].buildings.append("mass_driver")
+    opts_rail = g.haul_options(body.id, "ark")
+    assert opts_rail[0]["propellant_t"] < opts_chem[0]["propellant_t"]
+    assert opts_rail[0].get("mass_driver_ascent") is True
+
+
 def test_fab_bay_one_job_at_a_time():
     g = Game(universe_seed=70)
     _arrive(g)
