@@ -1099,6 +1099,30 @@ class Game:
             + (f" (Δv {cap:.0f} m/s tanks full)." if cap > 0 else "."),
         )
 
+    def rename_unit(self, unit_id: str, name: str) -> dict:
+        """Player-facing rename for probes, bots, haulers, or the ark."""
+        self.catch_up()
+        u = self.fleet.get(unit_id)
+        if not u:
+            raise ValueError("unknown unit")
+        cleaned = " ".join((name or "").strip().split())
+        if not cleaned:
+            raise ValueError("name cannot be empty")
+        if len(cleaned) > 40:
+            raise ValueError("name too long (max 40 characters)")
+        # Soft uniqueness: allow duplicates but warn in log if clash
+        clash = next(
+            (x for x in self.fleet.values() if x.id != unit_id and x.name == cleaned),
+            None,
+        )
+        old = u.name
+        u.name = cleaned
+        if clash:
+            self._log("order", f"Renamed {old} → {cleaned} (note: also used by {clash.id}).")
+        else:
+            self._log("order", f"Renamed {old} → {cleaned}.")
+        return self.snapshot()
+
     def queue_build(self, unit_kind: str, deploy_body_id: str = "") -> dict:
         """Authorize ark to build a unit or structure from seed materials + time.
 

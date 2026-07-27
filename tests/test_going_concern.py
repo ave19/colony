@@ -563,6 +563,24 @@ def test_haul_from_mass_driver_cheaper_than_chemical():
     assert opts_rail[0].get("mass_driver_ascent") is True
 
 
+def test_rename_unit():
+    g = Game(universe_seed=70)
+    _arrive(g)
+    g.queue_build("survey")
+    while not any(u.kind == "survey" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    sat = next(u for u in g.fleet.values() if u.kind == "survey")
+    g.rename_unit(sat.id, "  Pathfinder  ")
+    assert sat.name == "Pathfinder"
+    g.rename_unit("ark", "Home Base")
+    assert g.fleet["ark"].name == "Home Base"
+    try:
+        g.rename_unit(sat.id, "")
+        assert False
+    except ValueError:
+        pass
+
+
 def test_fab_bay_one_job_at_a_time():
     g = Game(universe_seed=70)
     _arrive(g)

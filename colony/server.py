@@ -99,6 +99,19 @@ def build_unit(body: BuildBody):
         raise HTTPException(400, str(e)) from e
 
 
+class RenameUnitBody(BaseModel):
+    unit_id: str
+    name: str
+
+
+@app.post("/api/rename_unit")
+def rename_unit(body: RenameUnitBody):
+    try:
+        return room().rename_unit(body.unit_id, body.name)
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/api/select_star")
 def select_star(body: SelectStarBody):
     try:

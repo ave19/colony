@@ -210,6 +210,33 @@ async function issueUnitOrder(unitId, order, targetId = "", resource = "") {
   });
 }
 
+async function promptRenameUnit(unitId) {
+  const u = unitById(unitId);
+  if (!u) return;
+  const next = window.prompt(`Rename ${u.kind}:`, u.name);
+  if (next == null) return; // cancelled
+  const name = next.trim();
+  if (!name || name === u.name) return;
+  try {
+    state = await api("/api/rename_unit", {
+      method: "POST",
+      body: JSON.stringify({ unit_id: unitId, name }),
+    });
+    selectedUnitId = unitId;
+    // Keep current cascade context if open on this unit / ark
+    if (cascade && cascade.kind === "unit" && cascade.unitId === unitId) {
+      cascade = { ...cascade, unitId };
+    }
+    if (cascade && cascade.kind === "ark" && unitId === "ark") {
+      cascade = { ...cascade };
+    }
+    $("toast").textContent = `Renamed to ${name}`;
+    render();
+  } catch (e) {
+    alert(String(e.message || e).slice(0, 280));
+  }
+}
+
 function unitIsBusy(u) {
   if (!u) return false;
   return (
@@ -1024,10 +1051,15 @@ function renderSurveyCascade(root, u) {
   });
 
   const body = $("cascade-body");
-  if (tab === "move") body.innerHTML = surveyCascadeMoveHtml(u, loc);
-  else if (tab === "survey") body.innerHTML = surveyCascadeFocusHtml(u, loc);
-  else body.innerHTML = surveyCascadeActionsHtml(u, loc, mission, busy);
+  const renameBar = `<p class="muted" style="margin:0 0 10px">
+    <button type="button" class="order" id="unit-rename" style="width:auto;display:inline-block">Rename…</button>
+  </p>`;
+  if (tab === "move") body.innerHTML = renameBar + surveyCascadeMoveHtml(u, loc);
+  else if (tab === "survey") body.innerHTML = renameBar + surveyCascadeFocusHtml(u, loc);
+  else body.innerHTML = renameBar + surveyCascadeActionsHtml(u, loc, mission, busy);
 
+  const rn = body.querySelector("#unit-rename");
+  if (rn) rn.onclick = () => promptRenameUnit(u.id);
   bindSurveyCascade(body, u, tab);
 }
 
@@ -1328,14 +1360,22 @@ function renderGenericUnitCascade(root, u) {
   root.querySelector(".cascade-window")?.classList.add("unit-card");
   cascade.tab = "actions";
   const loc = bodyById(u.location_id);
-  $("cascade-kicker").textContent = `${u.kind} · action card`;
+  const kindLabel =
+    u.kind === "miner" ? "Mining bot" : u.kind === "hauler" ? "Hauler" : u.kind;
+  $("cascade-kicker").textContent = `${kindLabel} · action card`;
   $("cascade-title").textContent = u.name;
   $("cascade-sub").textContent = `${u.status}${u.order ? " / " + u.order : ""} · @ ${
     loc ? loc.name : u.location_id
-  }`;
+  }${u.dv_capacity_m_s > 0 ? " · Δv " + formatDv(u.dv_remaining_m_s) : ""}`;
   $("cascade-tabs").innerHTML = `<button type="button" class="cascade-tab active" data-tab="actions">Actions</button>`;
   $("cascade-body").innerHTML = `
-    <p class="cascade-section-lead">Select a body on the map or bodies list, then use the Tasks panel for orders.</p>
+    <p class="muted" style="margin:0 0 10px">
+      <button type="button" class="order" id="unit-rename" style="width:auto;display:inline-block">Rename…</button>
+    </p>
+    ${dvBarHtml(u)}
+    <p class="cascade-section-lead">
+      Select a body on the map, open its card → <strong>Tasks</strong>, and assign this unit.
+    </p>
     <div class="action-stack">
       <button type="button" class="action-card danger-action" id="gen-idle">
         <span class="action-title">Stand by</span>
@@ -1343,6 +1383,8 @@ function renderGenericUnitCascade(root, u) {
       </button>
     </div>
   `;
+  const rn = $("unit-rename");
+  if (rn) rn.onclick = () => promptRenameUnit(u.id);
   const idle = $("gen-idle");
   if (idle) {
     idle.onclick = async () => {
@@ -1363,8 +1405,10 @@ function renderArkCascade(root) {
   const tab = cascade.tab || "survey";
   cascade.tab = tab;
 
+  const ark = unitById("ark") || (state.fleet || []).find((u) => u.kind === "ark");
+  const arkName = ark ? ark.name : "Colony Ark";
   $("cascade-kicker").textContent = "Colony ship · command console";
-  $("cascade-title").textContent = "Colony Ark";
+  $("cascade-title").textContent = arkName;
   const home = bodyById(state.home_body_id);
   const pop = (state.population || 0).toLocaleString();
   $("cascade-sub").textContent = home
@@ -1391,11 +1435,17 @@ function renderArkCascade(root) {
   });
 
   const body = $("cascade-body");
-  if (tab === "survey") body.innerHTML = arkCascadeSurveyHtml();
-  else if (tab === "fab") body.innerHTML = arkCascadeFabHtml();
-  else if (tab === "cargo") body.innerHTML = arkCascadeCargoHtml();
-  else body.innerHTML = arkCascadeStatusHtml();
+  // Rename control always available under title area via status/actions strip
+  const renameBar = `<p class="muted" style="margin:0 0 10px">
+    <button type="button" class="order" id="ark-rename" style="width:auto;display:inline-block">Rename ship…</button>
+  </p>`;
+  if (tab === "survey") body.innerHTML = renameBar + arkCascadeSurveyHtml();
+  else if (tab === "fab") body.innerHTML = renameBar + arkCascadeFabHtml();
+  else if (tab === "cargo") body.innerHTML = renameBar + arkCascadeCargoHtml();
+  else body.innerHTML = renameBar + arkCascadeStatusHtml();
 
+  const rn = body.querySelector("#ark-rename");
+  if (rn) rn.onclick = () => promptRenameUnit(ark ? ark.id : "ark");
   bindArkCascade(body, tab);
 }
 
@@ -1824,19 +1874,22 @@ function renderFleet() {
       const loc = bodyById(u.location_id);
       const isArk = u.kind === "ark";
       const isSurvey = u.kind === "survey";
-      const opensCard = isArk || isSurvey;
+      const opensCard = true;
       const busy =
         u.status !== "idle"
           ? `<div class="meta busy">${u.status} ${u.order || ""} ${u.months_left ? u.months_left + " mo" : ""}</div>`
           : `<div class="meta">@ ${loc ? loc.name : u.location_id}${
-              opensCard ? " · click for actions" : ""
+              opensCard ? " · click for card" : ""
             }</div>`;
-      return `<button type="button" class="fleet-item ${isArk ? "ark-item" : ""} ${
-        isSurvey ? "survey-item" : ""
-      } ${selectedUnitId === u.id ? "selected" : ""}" data-unit="${u.id}">
-        <div class="name">${u.name}</div>
-        <div class="meta">${u.kind}</div>${busy}
-      </button>`;
+      return `<div class="fleet-row ${selectedUnitId === u.id ? "selected" : ""}">
+        <button type="button" class="fleet-item ${isArk ? "ark-item" : ""} ${
+          isSurvey ? "survey-item" : ""
+        } ${selectedUnitId === u.id ? "selected" : ""}" data-unit="${u.id}">
+          <div class="name">${u.name}</div>
+          <div class="meta">${u.kind}</div>${busy}
+        </button>
+        <button type="button" class="fleet-rename" data-rename="${u.id}" title="Rename">✎</button>
+      </div>`;
     })
     .join("") || '<p class="empty">No fleet</p>';
   el.querySelectorAll("[data-unit]").forEach((btn) => {
@@ -1847,12 +1900,18 @@ function renderFleet() {
       $("panel-left").classList.remove("collapsed");
       if (u && u.kind === "ark") {
         openArkCascade();
-      } else if (u && u.kind === "survey") {
+      } else if (u) {
         openUnitCascade(u.id, "actions");
       } else {
         if (cascade) cascade = null;
         render();
       }
+    };
+  });
+  el.querySelectorAll("[data-rename]").forEach((btn) => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      promptRenameUnit(btn.dataset.rename);
     };
   });
   // Soft default select ark (does not auto-open console — click opens cascade)
@@ -1881,9 +1940,12 @@ function renderUnitPanel() {
       <p>${goals} scan goal${goals === 1 ? "" : "s"} · ${jobs} fab job${jobs === 1 ? "" : "s"}</p>
       <button type="button" class="primary open-cascade-btn" id="btn-open-ark">
         Open ark command console
-      </button>`;
+      </button>
+      <button type="button" class="open-cascade-btn" id="btn-rename-ark">Rename…</button>`;
     const b = $("btn-open-ark");
     if (b) b.onclick = () => openArkCascade();
+    const r = $("btn-rename-ark");
+    if (r) r.onclick = () => promptRenameUnit(u.id);
     return;
   }
   if (u.kind === "survey") {
@@ -1896,9 +1958,12 @@ function renderUnitPanel() {
       ${dvBarHtml(u)}
       <button type="button" class="primary open-cascade-btn" id="btn-open-survey">
         Open probe actions
-      </button>`;
+      </button>
+      <button type="button" class="open-cascade-btn" id="btn-rename-unit">Rename…</button>`;
     const b = $("btn-open-survey");
     if (b) b.onclick = () => openUnitCascade(u.id, "actions");
+    const r = $("btn-rename-unit");
+    if (r) r.onclick = () => promptRenameUnit(u.id);
     return;
   }
   el.hidden = false;
@@ -1908,7 +1973,12 @@ function renderUnitPanel() {
     <p>${u.kind} · ${(u.capabilities || []).join(", ")}</p>
     <p>@ ${loc ? loc.name : u.location_id}</p>
     <p>${u.status}${u.order ? " / " + u.order : ""}</p>
-    <p class="muted">Select a body on the map for orders.</p>`;
+    <button type="button" class="primary open-cascade-btn" id="btn-open-unit">Open unit card</button>
+    <button type="button" class="open-cascade-btn" id="btn-rename-unit">Rename…</button>`;
+  const open = $("btn-open-unit");
+  if (open) open.onclick = () => openUnitCascade(u.id, "actions");
+  const r = $("btn-rename-unit");
+  if (r) r.onclick = () => promptRenameUnit(u.id);
 }
 
 function renderBodyPanel() {

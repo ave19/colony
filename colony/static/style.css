@@ -205,12 +205,36 @@ h2:first-child { margin-top: 0; }
   display: block;
   width: 100%;
   text-align: left;
-  margin-bottom: 6px;
+  margin-bottom: 0;
   padding: 8px 10px;
+  flex: 1;
+  min-width: 0;
 }
 .fleet-item .name { font-weight: 600; font-size: 0.88rem; }
 .fleet-item .meta { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
 .fleet-item .busy { color: #e8a23a; }
+.fleet-row {
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+  margin-bottom: 6px;
+}
+.fleet-row.selected .fleet-item {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.fleet-rename {
+  flex-shrink: 0;
+  width: 36px;
+  padding: 0;
+  font-size: 0.95rem;
+  color: var(--muted);
+  border-radius: 6px;
+}
+.fleet-rename:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
 
 .badge {
   display: inline-block;
