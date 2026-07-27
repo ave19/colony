@@ -64,6 +64,9 @@
 
           <!-- Only when ark is selected: fabrication bay + authorize builds -->
           <div id="ark-bay" hidden>
+            <h2>Ark scan goals</h2>
+            <p class="muted">The ark keeps scanning the system for what you assign.</p>
+            <div id="ark-scan-goals"></div>
             <h2>Ark fabrication bay</h2>
             <div id="build-queue" class="queue-list"></div>
             <h2>Authorize construction</h2>
@@ -85,10 +88,14 @@
           <div id="dossier-detail"></div>
         </div>
         <div id="right-system" hidden>
+          <h2>Bodies</h2>
+          <p class="muted">Planets · expand for moons · click to select</p>
+          <div id="body-tree"></div>
+
           <h2>Selected body</h2>
-          <div id="body-panel" class="empty">Click a body in the map</div>
+          <div id="body-panel" class="empty">Pick a body from the list or map</div>
           <div id="orders-panel" hidden>
-            <h2>Orders</h2>
+            <h2>Tasks</h2>
             <div id="orders" class="choice-grid"></div>
           </div>
           <div id="build-panel" hidden>

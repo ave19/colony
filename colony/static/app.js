@@ -5,6 +5,7 @@ let state = null;
 let selectedUnitId = null;
 let selectedBodyId = null;
 let selectedDossierSeed = null;
+let expandedPlanets = new Set(); // body ids with moons shown
 let map = null;
 
 const $ = (id) => document.getElementById(id);
@@ -65,11 +66,10 @@ function initMap() {
   if (!canvas) throw new Error("map canvas missing");
   map = new SystemMap3D(canvas);
   map.onSelect = (id) => {
-    selectedBodyId = id;
-    $("panel-right").classList.remove("collapsed");
-    renderBodyPanel();
-    renderOrders();
-    renderBuild();
+    // Expand parent planet if a moon was clicked
+    const b = bodyById(id);
+    if (b && b.kind === "moon" && b.parent_id) expandedPlanets.add(b.parent_id);
+    selectBody(id, { focus: false, openRight: true });
   };
 }
 
@@ -141,7 +141,9 @@ function render() {
   renderEventSchedule();
   renderFleet();
   renderArkBay();
+  renderArkScanGoals();
   renderUnitPanel();
+  renderBodyTree();
   renderBodyPanel();
   renderOrders();
   renderBuild();
@@ -149,6 +151,147 @@ function render() {
   renderContracts();
   renderStock();
   renderEvents();
+}
+
+function selectBody(id, { focus = true, openRight = true } = {}) {
+  selectedBodyId = id;
+  if (openRight) $("panel-right").classList.remove("collapsed");
+  if (map) {
+    map.setSelected(id);
+    if (focus) map.focusBody(id);
+  }
+  renderBodyTree();
+  renderBodyPanel();
+  renderOrders();
+  renderBuild();
+}
+
+function renderBodyTree() {
+  const el = $("body-tree");
+  if (!el || state.phase !== "system") {
+    if (el) el.innerHTML = "";
+    return;
+  }
+  const tree = state.body_tree || [];
+  if (!tree.length) {
+    el.innerHTML = '<p class="empty">No bodies loaded.</p>';
+    return;
+  }
+  let html = "";
+  for (const node of tree) {
+    if (node.kind === "belt_group") {
+      const open = expandedPlanets.has("_belt");
+      html += `<button type="button" class="body-row" data-expand="_belt">
+        <span class="body-expand">${open ? "▾" : "▸"}</span>
+        <strong>${node.name}</strong>
+        <div class="meta">${(node.asteroids || []).length} objects</div>
+      </button>`;
+      if (open) {
+        for (const a of node.asteroids || []) {
+          const sel = selectedBodyId === a.id ? "selected" : "";
+          html += `<button type="button" class="body-row asteroid ${sel}" data-body="${a.id}">
+            ${a.name}
+            <div class="meta">${a.semi_major_au} AU · ${a.density_hint || ""}</div>
+          </button>`;
+        }
+      }
+      continue;
+    }
+    const open = expandedPlanets.has(node.id);
+    const sel = selectedBodyId === node.id ? "selected" : "";
+    const hab =
+      node.hab_intel >= 2
+        ? `<span class="hab-badge">hab intel ${node.hab_intel}</span>`
+        : node.in_hz
+          ? `<span class="hab-badge">HZ</span>`
+          : "";
+    html += `<button type="button" class="body-row ${sel}" data-body="${node.id}">
+      ${node.moon_count ? `<span class="body-expand" data-expand="${node.id}">${open ? "▾" : "▸"}</span>` : ""}
+      <strong>${node.name}</strong>${hab}
+      <div class="meta">${node.planet_class || "planet"} · ${node.semi_major_au} AU${
+        node.moon_count ? ` · ${node.moon_count} moon(s)` : ""
+      }</div>
+    </button>`;
+    if (open && node.moons) {
+      for (const m of node.moons) {
+        const msel = selectedBodyId === m.id ? "selected" : "";
+        html += `<button type="button" class="body-row moon ${msel}" data-body="${m.id}">
+          ${m.name}
+          <div class="meta">moon · a/R ${m.moon_a_over_R} · P ${m.period_days} d</div>
+        </button>`;
+      }
+    }
+  }
+  el.innerHTML = html;
+
+  el.querySelectorAll("[data-expand]").forEach((btn) => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const id = btn.getAttribute("data-expand");
+      if (expandedPlanets.has(id)) expandedPlanets.delete(id);
+      else expandedPlanets.add(id);
+      renderBodyTree();
+    };
+  });
+  el.querySelectorAll("[data-body]").forEach((btn) => {
+    btn.onclick = (ev) => {
+      // expand chevron is separate; whole row selects
+      if (ev.target.closest("[data-expand]") && ev.target.hasAttribute("data-expand")) return;
+      const id = btn.getAttribute("data-body");
+      // auto-expand planet when selected if it has moons
+      const node = (state.body_tree || []).find((n) => n.id === id);
+      if (node && node.moon_count) expandedPlanets.add(id);
+      selectBody(id);
+    };
+  });
+  // Expand on chevron attached to planet row
+  el.querySelectorAll(".body-row > .body-expand[data-expand]").forEach((span) => {
+    span.onclick = (ev) => {
+      ev.stopPropagation();
+      const id = span.getAttribute("data-expand");
+      if (expandedPlanets.has(id)) expandedPlanets.delete(id);
+      else expandedPlanets.add(id);
+      renderBodyTree();
+    };
+  });
+}
+
+function renderArkScanGoals() {
+  const el = $("ark-scan-goals");
+  if (!el || state.phase !== "system") return;
+  if (!isArkSelected()) {
+    el.innerHTML = "";
+    return;
+  }
+  const specs = state.ark_scan_goal_specs || {};
+  const active = new Set(state.ark_scan_goals || []);
+  el.innerHTML = Object.values(specs)
+    .map((s) => {
+      const on = active.has(s.id);
+      return `<label class="goal-toggle ${on ? "active" : ""}">
+        <input type="checkbox" data-goal="${s.id}" ${on ? "checked" : ""} />
+        <span>
+          <div class="g-title">${s.label}</div>
+          <div class="g-desc">${s.description || ""}</div>
+        </span>
+      </label>`;
+    })
+    .join("");
+  el.querySelectorAll("[data-goal]").forEach((inp) => {
+    inp.onchange = async () => {
+      try {
+        state = await api("/api/ark_scan_goal", {
+          method: "POST",
+          body: JSON.stringify({ goal_id: inp.dataset.goal, enabled: inp.checked }),
+        });
+        selectedUnitId = "ark";
+        render();
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 280));
+        inp.checked = !inp.checked;
+      }
+    };
+  });
 }
 
 function renderEventSchedule() {
@@ -488,7 +631,13 @@ async function renderOrders() {
   html += btn("idle", "Stand by / recall", b.id, "", true);
 
   if (caps.includes("survey")) {
-    html += `<h2>Search for sources</h2>`;
+    const scanLabel =
+      b.kind === "moon"
+        ? `Scan moon ${b.name}`
+        : b.kind === "asteroid"
+          ? `Scan ${b.name}`
+          : `Scan ${b.name}`;
+    html += `<h2>Scan tasks</h2>`;
     if (surveyingHere) {
       const what = u.search_resource
         ? resNames[u.search_resource] || u.search_resource
@@ -496,30 +645,23 @@ async function renderOrders() {
       const sm = u.search_resource
         ? (b.seek_months && b.seek_months[u.search_resource]) || 0
         : b.survey_months || 0;
-      html += `<div class="queue-job">
-        <div class="title">Searching: ${what}</div>
-        <div class="meta">${sm.toFixed(1)} mo on station · warp to advance · stand by to reassign</div>
+      html += `<div class="queue-job next">
+        <div class="title">${scanLabel} — ${what}</div>
+        <div class="meta">${sm.toFixed(1)} mo on station · warp for progress · stand by to reassign</div>
       </div>`;
     } else {
-      html += `<p class="muted">Choose what to look for on ${b.name}:</p>`;
+      html += btn("survey", `${scanLabel} (broad)`, b.id, "", !busy);
+      html += `<p class="muted">Or seek a specific resource on ${b.name}:</p>`;
       for (const res of searchable) {
         const name = resNames[res] || res;
         if (foundRes.has(res)) {
-          html += `<button type="button" class="order" disabled>Find sources of ${name} — site already found</button>`;
+          html += `<button type="button" class="order" disabled>Find sources of ${name} — site found</button>`;
         } else if (exhausted.has(res)) {
-          html += `<button type="button" class="order" disabled>Find sources of ${name} — none viable here</button>`;
+          html += `<button type="button" class="order" disabled>Find sources of ${name} — none here</button>`;
         } else {
-          const can = !busy;
-          html += btn(
-            "survey",
-            `Find sources of ${name}`,
-            b.id,
-            res,
-            can
-          );
+          html += btn("survey", `Find sources of ${name}`, b.id, res, !busy);
         }
       }
-      html += btn("survey", "Broad composition survey", b.id, "", !busy);
     }
   }
 

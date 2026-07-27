@@ -10,10 +10,11 @@ from typing import Any, Dict, List, Optional
 from .constants import (
     ARK_POPULATION,
     DAYS_PER_MONTH,
+    G,
     SECONDS_PER_DAY,
     SEED_FE_TONNES,
 )
-from .orbits import transfer_options
+from .orbits import period_seconds, transfer_options
 from .system_gen import StarSystem, build_survey_archive, generate_system
 from .tech import (
     BUILDINGS,
@@ -224,6 +225,11 @@ class Game:
         self.scanned: set[str] = set()
         self.auto_warp_votes = 0
         self.home_body_id: str = ""
+        # Ark-level continuous scan goals (system-wide), e.g. "habitable", "Fe", "asteroids"
+        self.ark_scan_goals: List[str] = []
+        # Per-body habitability intel 0..3 (ark / broad survey)
+        self.hab_intel: Dict[str, int] = {}
+        self.hab_seek_months: Dict[str, float] = {}
 
     # --- time ---
     def catch_up(self) -> float:
@@ -274,9 +280,242 @@ class Game:
                     self._complete_unit_order(u)
 
         self._tick_builds(months)
+        self._tick_ark_scan_goals(months)
         # No auto ark consumption of seed stock. Sites tick only with buildings.
         self._site_tick(months)
         return months
+
+    # --- Ark system-wide scan goals -----------------------------------------
+    ARK_SCAN_GOAL_SPECS = {
+        "habitable": {
+            "id": "habitable",
+            "label": "Find possible habitable bodies",
+            "description": "Remote assessment of HZ, atmosphere, and water signatures.",
+        },
+        "Fe": {
+            "id": "Fe",
+            "label": "Find iron sources",
+            "description": "System-wide search for Fe-bearing worlds and asteroids.",
+            "resource": "Fe",
+        },
+        "H2O": {
+            "id": "H2O",
+            "label": "Find water / ice sources",
+            "description": "Look for ice moons, outer belts, hydrated rock.",
+            "resource": "H2O",
+        },
+        "asteroids": {
+            "id": "asteroids",
+            "label": "Survey asteroid belt",
+            "description": "Catalog belt objects and their accessible materials.",
+        },
+        "CH4": {
+            "id": "CH4",
+            "label": "Find methane / organics",
+            "description": "Giants, icy moons, and carbonaceous rocks.",
+            "resource": "CH4",
+        },
+    }
+
+    def set_ark_scan_goal(self, goal_id: str, enabled: bool = True) -> dict:
+        """Toggle a continuous ark scan goal (system-wide)."""
+        self.catch_up()
+        if self.phase != "system":
+            raise ValueError("only after arrival")
+        if goal_id not in self.ARK_SCAN_GOAL_SPECS:
+            raise ValueError(f"unknown scan goal {goal_id}")
+        if enabled:
+            if goal_id not in self.ark_scan_goals:
+                self.ark_scan_goals.append(goal_id)
+                self._log(
+                    "scan",
+                    f"Ark scan goal set: {self.ARK_SCAN_GOAL_SPECS[goal_id]['label']}",
+                )
+        else:
+            if goal_id in self.ark_scan_goals:
+                self.ark_scan_goals.remove(goal_id)
+                self._log("scan", f"Ark scan goal cleared: {goal_id}")
+        return self.snapshot()
+
+    def _tick_ark_scan_goals(self, months: float) -> None:
+        """Ark remote sensing — slower than a probe on-station, covers the system."""
+        if not self.system or not self.ark_scan_goals or months <= 0:
+            return
+        # Remote rate: fraction of an on-site probe
+        rate = months * 0.35
+        for goal_id in list(self.ark_scan_goals):
+            spec = self.ARK_SCAN_GOAL_SPECS.get(goal_id)
+            if not spec:
+                continue
+            if goal_id == "habitable":
+                self._ark_seek_habitable(rate)
+            elif goal_id == "asteroids":
+                self._ark_seek_asteroids(rate)
+            elif spec.get("resource"):
+                self._ark_seek_resource(spec["resource"], rate)
+
+    def _ark_seek_habitable(self, months: float) -> None:
+        assert self.system
+        from .system_gen import _habitable_zone, _snow_line_au
+        from .constants import AU_M
+
+        lum = float(self.system.star.get("lum") or 1.0)
+        hz_in, hz_out = _habitable_zone(lum)
+        # Prioritize rocky worlds near HZ
+        candidates = [
+            b
+            for b in self.system.bodies
+            if b.kind == "planet" and b.planet_class == "rocky"
+        ]
+        candidates.sort(
+            key=lambda b: abs((b.semi_major_m / AU_M) - 0.5 * (hz_in + hz_out))
+        )
+        for b in candidates:
+            if self.hab_intel.get(b.id, 0) >= 3:
+                continue
+            self.hab_seek_months[b.id] = self.hab_seek_months.get(b.id, 0.0) + months
+            sm = self.hab_seek_months[b.id]
+            # thresholds for remote hab assessment
+            levels = [(0.8, 1), (2.0, 2), (3.5, 3)]
+            old = self.hab_intel.get(b.id, 0)
+            new = old
+            for t, lv in levels:
+                if sm >= t:
+                    new = max(new, lv)
+            if new > old:
+                self.hab_intel[b.id] = new
+                a_au = b.semi_major_m / AU_M
+                in_hz = hz_in <= a_au <= hz_out
+                has_h2o = any(d.resource == "H2O" for d in b.deposits)
+                note = {
+                    1: f"HZ context for {b.name}: a={a_au:.2f} AU ({'in' if in_hz else 'outside'} optimistic HZ)",
+                    2: f"Atmosphere check {b.name}: {b.atmosphere_note or 'no thick air noted'}",
+                    3: f"Habitability sketch {b.name}: "
+                    f"{'temperate band' if in_hz else 'extreme insolation'}; "
+                    f"{'water signatures possible' if has_h2o or b.ice_likely else 'dry priors'}; "
+                    f"{'atmosphere present' if b.has_atmosphere else 'airless/thin'}",
+                }.get(new, "")
+                if note:
+                    self._log("scan", f"Ark (habitable search): {note}")
+            break  # focus one body at a time for progressive feel
+
+    def _ark_seek_asteroids(self, months: float) -> None:
+        assert self.system
+        rocks = [b for b in self.system.bodies if b.kind == "asteroid"]
+        rocks.sort(key=lambda b: b.survey_months)
+        for b in rocks:
+            if b.survey_months >= 4.0 and b.mine_sites:
+                continue
+            notes = b.apply_survey_time(months * 0.8, focus_resource=None)
+            self.scanned.add(b.id)
+            if notes:
+                self._log("scan", f"Ark (belt survey) {b.name}: " + "; ".join(notes))
+            break
+
+    def _ark_seek_resource(self, resource: str, months: float) -> None:
+        assert self.system
+        # Prefer bodies that can host this resource and lack a site yet
+        cands = []
+        for b in self.system.bodies:
+            if any(s.resource == resource for s in b.mine_sites):
+                continue
+            if resource in b.seek_exhausted:
+                continue
+            from .system_gen import _searchable_resources
+
+            if resource not in _searchable_resources(b) and not any(
+                d.resource == resource for d in b.deposits
+            ):
+                continue
+            cands.append(b)
+        # Prefer closer to home for remote sensing narrative
+        home = self.home_body_id
+        def key(b):
+            return (b.seek_months.get(resource, 0.0), abs(hash(b.id) % 100))
+
+        cands.sort(key=key)
+        if not cands:
+            return
+        b = cands[0]
+        notes = b.apply_survey_time(months, focus_resource=resource)
+        self.scanned.add(b.id)
+        if notes:
+            self._log(
+                "scan",
+                f"Ark seeking {RESOURCE_NAMES.get(resource, resource)} @ {b.name}: "
+                + "; ".join(notes),
+            )
+
+    def body_tree(self) -> List[dict]:
+        """Hierarchical body list for UI: planets with nested moons, then belt."""
+        if not self.system:
+            return []
+        from .constants import AU_M
+        from .system_gen import _habitable_zone
+
+        lum = float(self.system.star.get("lum") or 1.0)
+        hz_in, hz_out = _habitable_zone(lum)
+        planets = sorted(
+            [b for b in self.system.bodies if b.kind == "planet"],
+            key=lambda b: b.semi_major_m,
+        )
+        asteroids = sorted(
+            [b for b in self.system.bodies if b.kind == "asteroid"],
+            key=lambda b: b.semi_major_m,
+        )
+        tree = []
+        for p in planets:
+            a_au = p.semi_major_m / AU_M
+            moons = sorted(
+                [m for m in self.system.bodies if m.kind == "moon" and m.parent_id == p.id],
+                key=lambda m: m.semi_major_m,
+            )
+            tree.append(
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "kind": "planet",
+                    "planet_class": p.planet_class,
+                    "semi_major_au": round(a_au, 3),
+                    "in_hz": hz_in <= a_au <= hz_out and p.planet_class == "rocky",
+                    "hab_intel": self.hab_intel.get(p.id, 0),
+                    "moon_count": len(moons),
+                    "moons": [
+                        {
+                            "id": m.id,
+                            "name": m.name,
+                            "kind": "moon",
+                            "moon_a_over_R": round(m.semi_major_m / p.radius_m, 2),
+                            "period_days": round(
+                                period_seconds(m.semi_major_m, G * p.mass_kg) / 86400.0, 2
+                            ),
+                        }
+                        for m in moons
+                    ],
+                }
+            )
+        if asteroids:
+            tree.append(
+                {
+                    "id": "_belt",
+                    "name": "Asteroid belt",
+                    "kind": "belt_group",
+                    "planet_class": "asteroid",
+                    "semi_major_au": None,
+                    "moons": [],
+                    "asteroids": [
+                        {
+                            "id": a.id,
+                            "name": a.name,
+                            "kind": "asteroid",
+                            "semi_major_au": round(a.semi_major_m / AU_M, 3),
+                            "density_hint": a.density_hint,
+                        }
+                        for a in asteroids
+                    ],
+                }
+            )
+        return tree
 
     def _tick_builds(self, months: float) -> None:
         for job in list(self.build_queue):
@@ -429,6 +668,18 @@ class Game:
                         "months": self.SURVEY_WARP_SLICE_MONTHS,
                         "unit_id": u.id,
                         "body_id": u.location_id,
+                    }
+                )
+        # Ark continuous goals show as recurring checkpoints
+        if self.phase == "system" and self.ark_scan_goals:
+            for gid in self.ark_scan_goals:
+                spec = self.ARK_SCAN_GOAL_SPECS.get(gid, {})
+                items.append(
+                    {
+                        "kind": "ark_scan",
+                        "label": f"Ark scan: {spec.get('label', gid)}",
+                        "months": self.SURVEY_WARP_SLICE_MONTHS,
+                        "goal_id": gid,
                     }
                 )
         items.sort(key=lambda x: x["months"])
@@ -1177,6 +1428,10 @@ class Game:
             "transit_months_left": round(self.transit_months_left, 2),
             "event_queue": self.event_queue()[:8],
             "next_event": (self.event_queue() or [None])[0],
+            "ark_scan_goals": list(self.ark_scan_goals),
+            "ark_scan_goal_specs": self.ARK_SCAN_GOAL_SPECS,
+            "hab_intel": dict(self.hab_intel),
+            "body_tree": self.body_tree() if self.phase == "system" else [],
             "build_options": {
                 "power": {k: {"name": v["name"], "description": v["description"]} for k, v in POWER_OPTIONS.items()},
                 "hab": {k: {"name": v["name"], "description": v["description"]} for k, v in HAB_OPTIONS.items()},
@@ -1184,6 +1439,9 @@ class Game:
         }
         if self.system:
             data["system"] = self.system.to_dict(self.sim_time_s)
+            # attach hab_intel onto body dicts for UI convenience
+            for b in data["system"].get("bodies", []):
+                b["hab_intel"] = self.hab_intel.get(b["id"], 0)
         return data
 
 

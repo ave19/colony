@@ -134,6 +134,40 @@ def test_directed_search_can_exhaust_missing_resource():
     assert "Fe" in body.seek_exhausted
 
 
+def test_body_tree_lists_planets_and_moons():
+    g = Game(universe_seed=8)
+    g.open_survey_archive()
+    g.select_star(g.catalog[0]["seed"])
+    while g.phase == "transit":
+        g.warp_to_next_event(force=True)
+    tree = g.body_tree()
+    planets = [n for n in tree if n["kind"] == "planet"]
+    assert planets
+    multi = [n for n in planets if n["moon_count"] >= 1]
+    assert multi
+    assert all("moons" in n for n in multi)
+
+
+def test_ark_scan_goal_habitable_and_iron():
+    g = Game(universe_seed=8)
+    g.open_survey_archive()
+    g.select_star(g.catalog[0]["seed"])
+    while g.phase == "transit":
+        g.warp_to_next_event(force=True)
+    g.set_ark_scan_goal("habitable", True)
+    g.set_ark_scan_goal("Fe", True)
+    assert "habitable" in g.ark_scan_goals and "Fe" in g.ark_scan_goals
+    # Ark goals appear on event queue
+    kinds = [e["kind"] for e in g.event_queue()]
+    assert "ark_scan" in kinds
+    for _ in range(40):
+        g.advance(SECONDS_PER_DAY * 30)
+    # Some hab intel or Fe seek progress should exist
+    assert g.hab_intel or any(
+        b.seek_months.get("Fe", 0) > 0 for b in g.system.bodies
+    )
+
+
 def test_survey_probe_arrival_is_on_event_queue():
     g = Game(universe_seed=44)
     g.open_survey_archive()

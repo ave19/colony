@@ -105,6 +105,19 @@ def select_star(body: SelectStarBody):
         raise HTTPException(400, str(e)) from e
 
 
+class ArkScanGoalBody(BaseModel):
+    goal_id: str
+    enabled: bool = True
+
+
+@app.post("/api/ark_scan_goal")
+def ark_scan_goal(body: ArkScanGoalBody):
+    try:
+        return room().set_ark_scan_goal(body.goal_id, body.enabled)
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+
+
 class WarpBody(BaseModel):
     force: bool = False  # confirm long jumps (>~1 week)
 

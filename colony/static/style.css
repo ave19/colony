@@ -294,6 +294,52 @@ details.drawer summary {
   font-style: italic;
 }
 
+.body-tree { margin-bottom: 12px; max-height: 40vh; overflow: auto; }
+.body-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-bottom: 4px;
+  padding: 7px 8px;
+  background: rgba(15, 24, 36, 0.9);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+.body-row:hover { border-color: var(--accent); }
+.body-row.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.body-row .meta { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
+.body-row.moon { margin-left: 14px; width: calc(100% - 14px); background: rgba(12, 20, 30, 0.95); }
+.body-row.asteroid { margin-left: 10px; width: calc(100% - 10px); font-size: 0.78rem; }
+.body-expand {
+  display: inline-block;
+  width: 1.1em;
+  color: var(--accent);
+  font-weight: 700;
+}
+.hab-badge {
+  color: var(--good);
+  font-size: 0.68rem;
+  margin-left: 4px;
+}
+.goal-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px;
+  background: rgba(15, 24, 36, 0.9);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.goal-toggle.active { border-color: var(--accent); }
+.goal-toggle input { margin-top: 3px; }
+.goal-toggle .g-title { font-size: 0.85rem; font-weight: 600; }
+.goal-toggle .g-desc { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
+
 @media (max-width: 700px) {
   .float-panel { width: min(300px, calc(100vw - 20px)); }
   .hud-hint { font-size: 0.65rem; max-width: 90vw; white-space: normal; text-align: center; }
