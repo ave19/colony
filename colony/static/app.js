@@ -4,6 +4,7 @@ import { SystemMap3D } from "/static/map3d.js";
 let state = null;
 let selectedUnitId = null;
 let selectedBodyId = null;
+let selectedDossierSeed = null;
 let map = null;
 
 const $ = (id) => document.getElementById(id);
@@ -136,6 +137,7 @@ function render() {
   }
 
   renderCatalog();
+  renderDossierDetail();
   renderFleet();
   renderArkBay();
   renderUnitPanel();

@@ -219,8 +219,7 @@ class Game:
         self.selected_seed: Optional[int] = None
         self.transit_months_left: float = 0.0
         self.message: str = (
-            "Humanity is a going concern. Open the survey archive to review "
-            "remote dossiers, then commit a destination."
+            "Open the survey archive to review remote dossiers, then commit a destination."
         )
         self.scanned: set[str] = set()
         self.auto_warp_votes = 0

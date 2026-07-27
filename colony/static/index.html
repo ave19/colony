@@ -46,7 +46,7 @@
       <div class="panel-body">
         <div id="panel-menu">
           <h2>Survey archive</h2>
-          <p class="muted">Humanity is a going concern. View remote dossiers already on file — then commit a destination.</p>
+          <p class="muted">Remote dossiers from the colonial network. Select one to open details.</p>
           <button type="button" id="btn-catalog" class="primary">View survey results</button>
           <div id="catalog"></div>
         </div>
@@ -78,7 +78,10 @@
     <aside id="panel-right" class="float-panel right collapsed">
       <button type="button" class="panel-toggle" id="toggle-right" title="Toggle panel">☰</button>
       <div class="panel-body">
-        <div id="right-menu" class="muted">Open the survey archive to begin.</div>
+        <div id="right-menu">
+          <p class="muted" id="right-menu-hint">Open the survey archive (left), then select a star.</p>
+          <div id="dossier-detail"></div>
+        </div>
         <div id="right-system" hidden>
           <h2>Selected body</h2>
           <div id="body-panel" class="empty">Click a body in the map</div>

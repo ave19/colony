@@ -1,6 +1,8 @@
 # Colony
 
-Humanity is a **going concern**. You lead one colony ship into a system that already has remote survey data on file; you settle with real orbital logistics until you can build more colony ships.
+You lead a colony ship into a system that already has remote survey data on file, then settle it with real orbital logistics until you can build more colony ships.
+
+*(Design note for us: the world is a “going concern” — activity and dossiers exist before the player clicks.)*
 
 ## Intended loop (current playable)
 
