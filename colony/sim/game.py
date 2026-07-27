@@ -120,6 +120,40 @@ class Site:
         return {"body_id": self.body_id, "buildings": self.buildings, "stockpile": {k: round(v, 2) for k, v in self.stockpile.items()}}
 
 
+# Capability tags a unit can apply to a target body
+CAP_SURVEY = "survey"
+CAP_MINE = "mine"
+CAP_HAUL = "haul"
+CAP_BUILD = "build"  # ark / construction focus
+CAP_COMMAND = "command"
+
+
+@dataclass
+class FleetUnit:
+    id: str
+    name: str
+    kind: str  # ark | survey | miner | hauler
+    location_id: str  # body id or "transit"
+    status: str = "idle"  # idle | en_route | working
+    order: str = ""
+    target_id: str = ""
+    months_left: float = 0.0
+    capabilities: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "kind": self.kind,
+            "location_id": self.location_id,
+            "status": self.status,
+            "order": self.order,
+            "target_id": self.target_id,
+            "months_left": round(self.months_left, 2),
+            "capabilities": self.capabilities,
+        }
+
+
 class Game:
     """Single colony room simulation."""
 
@@ -135,6 +169,7 @@ class Game:
         self.contracts: Dict[str, Contract] = {}
         self.hauls: Dict[str, Haul] = {}
         self.sites: Dict[str, Site] = {}
+        self.fleet: Dict[str, FleetUnit] = {}
         # Ark inventory (orbital, at star capture)
         self.ark_stock: Dict[str, float] = {
             "Fe": SEED_FE_TONNES,
@@ -164,9 +199,9 @@ class Game:
         self.last_wall = now
         if self.phase == "menu":
             return 0.0
-        # 1× real time → game seconds; scale: 1 real second = 1 game day for playability
-        # (centuries-long voyages use month units in UI; local play uses accelerated day clock)
-        game_dt_s = dt * SECONDS_PER_DAY  # 1 wall sec = 1 game day
+        # Believable sky: live clock is slow. 1 wall second ≈ 1 game day / 7
+        # (Earth year ~ 42 wall minutes). Use Warp for logistics jumps.
+        game_dt_s = dt * (SECONDS_PER_DAY / 7.0)
         return self.advance(game_dt_s)
 
     def advance(self, game_dt_s: float) -> float:
@@ -184,7 +219,6 @@ class Game:
         if self.phase != "system":
             return months
 
-        # Hauls
         for h in list(self.hauls.values()):
             if h.status != "in_flight":
                 continue
@@ -192,12 +226,14 @@ class Game:
             if h.months_left <= 0:
                 self._complete_haul(h)
 
-        # Ark trickle production (always on)
-        self._ark_tick(months)
+        for u in list(self.fleet.values()):
+            if u.status in ("en_route", "working") and u.months_left > 0:
+                u.months_left -= months
+                if u.months_left <= 0:
+                    self._complete_unit_order(u)
 
-        # Site extractors if deposit known
+        # No auto ark consumption. Sites tick only with buildings.
         self._site_tick(months)
-
         return months
 
     def warp_to_next_event(self) -> dict:
@@ -209,15 +245,18 @@ class Game:
         for h in self.hauls.values():
             if h.status == "in_flight" and h.months_left > 0:
                 targets.append(h.months_left)
+        for u in self.fleet.values():
+            if u.months_left > 0 and u.status in ("en_route", "working"):
+                targets.append(u.months_left)
         if not targets:
-            # nudge one month
-            self.advance(SECONDS_PER_DAY * DAYS_PER_MONTH)
-            self._log("event", "No pending events — advanced 1 month.")
-            return {"warped_months": 1.0, "reason": "idle_nudge"}
+            # Small nudge: 1 week of game time (not a full month of chaos)
+            self.advance(SECONDS_PER_DAY * 7)
+            self._log("event", "No pending orders — advanced 1 week.")
+            return {"warped_months": 7.0 / DAYS_PER_MONTH, "reason": "idle_nudge"}
         m = min(targets)
         self.advance(m * SECONDS_PER_DAY * DAYS_PER_MONTH)
         self.auto_warp_votes += 1
-        self._log("event", f"Warped {m:.2f} months to next event.")
+        self._log("event", f"Warped {m:.2f} months to next order/event.")
         return {"warped_months": m, "reason": "next_event"}
 
     def _log(self, kind: str, text: str) -> None:
@@ -255,32 +294,166 @@ class Game:
     def _arrive(self) -> None:
         self.phase = "system"
         self.ark_stock["Xe"] = 0.0
+        assert self.system
+        # Park near innermost rocky planet (or first planet)
+        home = next(
+            (b for b in self.system.bodies if b.kind == "planet" and b.planet_class == "rocky"),
+            next(b for b in self.system.bodies if b.kind == "planet"),
+        )
+        self.sites["ark_orbit"] = Site(body_id=home.id, buildings=["ark"], stockpile={})
+        self._spawn_starting_fleet(home.id)
         self._log(
             "arrival",
-            "Capture complete. Xenon tanks dry. 10,000 souls aboard. The ark can trickle-fab basics — slowly.",
+            f"Capture complete at {home.name}. Xe tanks dry. Select a unit, click a body, give an order.",
         )
-        # Park ark conceptually at first rocky-ish body orbit — inventory is "orbital depot"
-        if self.system:
-            rocky = next(
-                (b for b in self.system.bodies if b.kind == "planet" and b.metal_likely),
-                self.system.bodies[0],
-            )
-            self.sites["ark_orbit"] = Site(body_id=rocky.id, buildings=["ark"], stockpile={})
+
+    def _spawn_starting_fleet(self, home_id: str) -> None:
+        self.fleet.clear()
+        units = [
+            FleetUnit("ark", "Colony Ark", "ark", home_id, capabilities=[CAP_COMMAND, CAP_BUILD, CAP_HAUL]),
+            FleetUnit("sv1", "Survey Sat-1", "survey", home_id, capabilities=[CAP_SURVEY]),
+            FleetUnit("sv2", "Survey Sat-2", "survey", home_id, capabilities=[CAP_SURVEY]),
+            FleetUnit("mn1", "Miner Bot-1", "miner", home_id, capabilities=[CAP_MINE]),
+            FleetUnit("mn2", "Miner Bot-2", "miner", home_id, capabilities=[CAP_MINE]),
+            FleetUnit("hl1", "Hauler-1", "hauler", home_id, capabilities=[CAP_HAUL]),
+            FleetUnit("hl2", "Hauler-2", "hauler", home_id, capabilities=[CAP_HAUL]),
+        ]
+        for u in units:
+            self.fleet[u.id] = u
+
+    def _travel_months(self, from_id: str, to_id: str) -> float:
+        """Rough cruise time from orbital radii (economy transfer)."""
+        if from_id == to_id:
+            return 0.05
+        try:
+            opts = self.haul_options(from_id if from_id != "ark" else "ark", to_id)
+            return max(0.05, opts[0]["months"]) if opts else 1.0
+        except Exception:
+            return 1.0
+
+    def issue_order(self, unit_id: str, order: str, target_id: str = "") -> dict:
+        """
+        Apply a unit's capability to a target: survey | mine | move | build_base prep.
+        Pattern: select unit → select body → order.
+        """
+        self.catch_up()
+        u = self.fleet.get(unit_id)
+        if not u:
+            raise ValueError("unknown unit")
+        if u.status in ("en_route", "working") and u.months_left > 0:
+            raise ValueError(f"{u.name} is busy ({u.status})")
+        assert self.system
+
+        if order == "idle":
+            u.status = "idle"
+            u.order = ""
+            u.target_id = ""
+            u.months_left = 0.0
+            self._log("order", f"{u.name}: standing by.")
+            return self.snapshot()
+
+        if order == "survey":
+            if CAP_SURVEY not in u.capabilities:
+                raise ValueError("unit cannot survey")
+            body = self.system.body_by_id(target_id)
+            if not body:
+                raise ValueError("pick a body to survey")
+            travel = self._travel_months(u.location_id, target_id)
+            work = 0.15  # survey pass
+            u.order = "survey"
+            u.target_id = target_id
+            u.status = "en_route" if travel > 0.05 else "working"
+            u.months_left = travel + work
+            self._log("order", f"{u.name} → survey {body.name} ({u.months_left:.2f} mo).")
+            return self.snapshot()
+
+        if order == "mine":
+            if CAP_MINE not in u.capabilities:
+                raise ValueError("unit cannot mine")
+            body = self.system.body_by_id(target_id)
+            if not body:
+                raise ValueError("pick a body to mine")
+            if target_id not in self.scanned and not any(d.known for d in body.deposits):
+                raise ValueError("survey this body before mining")
+            travel = self._travel_months(u.location_id, target_id)
+            u.order = "mine"
+            u.target_id = target_id
+            u.status = "en_route"
+            u.months_left = travel + 0.5  # start a mining shift
+            self._log("order", f"{u.name} → mine {body.name}.")
+            return self.snapshot()
+
+        if order == "move":
+            body = self.system.body_by_id(target_id)
+            if not body:
+                raise ValueError("pick a destination")
+            travel = self._travel_months(u.location_id, target_id)
+            u.order = "move"
+            u.target_id = target_id
+            u.status = "en_route"
+            u.months_left = max(0.05, travel)
+            self._log("order", f"{u.name} → move to {body.name} ({u.months_left:.2f} mo).")
+            return self.snapshot()
+
+        raise ValueError(f"unknown order {order}")
+
+    def _complete_unit_order(self, u: FleetUnit) -> None:
+        assert self.system
+        if u.order == "move":
+            u.location_id = u.target_id
+            u.status = "idle"
+            u.order = ""
+            body = self.system.body_by_id(u.location_id)
+            self._log("order", f"{u.name} arrived at {body.name if body else u.location_id}.")
+            u.target_id = ""
+            u.months_left = 0.0
+            return
+
+        if u.order == "survey":
+            u.location_id = u.target_id
+            body = self.system.body_by_id(u.target_id)
+            if body:
+                for d in body.deposits:
+                    d.known = True
+                self.scanned.add(body.id)
+                self._log("scan", f"{u.name} surveyed {body.name}. Deposits known.")
+            u.status = "idle"
+            u.order = ""
+            u.target_id = ""
+            u.months_left = 0.0
+            return
+
+        if u.order == "mine":
+            u.location_id = u.target_id
+            body = self.system.body_by_id(u.target_id)
+            site = self.sites.setdefault(u.target_id, Site(body_id=u.target_id))
+            if "extractor" not in site.buildings:
+                site.buildings.append("extractor")  # bot sets up a rudimentary dig
+            extracted = 0.0
+            if body:
+                for dep in body.deposits:
+                    if dep.known and dep.amount_t > 0:
+                        took = min(dep.amount_t, 40.0 * dep.grade)
+                        dep.amount_t -= took
+                        site.stockpile[dep.resource] = site.stockpile.get(dep.resource, 0.0) + took
+                        extracted += took
+            self._log("mine", f"{u.name} mined at {body.name if body else u.target_id}: {extracted:.0f} t to site stockpile.")
+            u.status = "idle"
+            u.order = ""
+            u.target_id = ""
+            u.months_left = 0.0
+            return
+
+        u.status = "idle"
+        u.months_left = 0.0
 
     # --- scan / base plans ---
     def scan_body(self, body_id: str) -> dict:
-        self.catch_up()
-        assert self.system
-        body = self.system.body_by_id(body_id)
-        if not body:
-            raise ValueError("unknown body")
-        for d in body.deposits:
-            d.known = True
-        self.scanned.add(body_id)
-        self._log("scan", f"Survey complete: {body.name}. Deposits measured.")
-        # small chip/time cost
-        self.ark_stock["chip"] = max(0.0, self.ark_stock.get("chip", 0) - 0.5)
-        return self.snapshot()
+        """Legacy helper: instant survey via first free survey sat, or error."""
+        free = next((u for u in self.fleet.values() if CAP_SURVEY in u.capabilities and u.status == "idle"), None)
+        if not free:
+            raise ValueError("no idle survey unit — select a survey sat and order Survey")
+        return self.issue_order(free.id, "survey", body_id)
 
     def plan_base(self, body_id: str, power_id: str, hab_id: str, name: str = "") -> dict:
         self.catch_up()
@@ -567,10 +740,15 @@ class Game:
             "projects": [p.to_dict() for p in self.projects.values()],
             "contracts": [c.to_dict() for c in self.contracts.values()],
             "hauls": [h.to_dict() for h in self.hauls.values()],
+            "fleet": [u.to_dict() for u in self.fleet.values()],
             "sites": {k: v.to_dict() for k, v in self.sites.items()},
             "scanned": list(self.scanned),
             "tech": tech_book_summary(),
             "transit_months_left": round(self.transit_months_left, 2),
+            "build_options": {
+                "power": {k: {"name": v["name"], "description": v["description"]} for k, v in POWER_OPTIONS.items()},
+                "hab": {k: {"name": v["name"], "description": v["description"]} for k, v in HAB_OPTIONS.items()},
+            },
         }
         if self.system:
             data["system"] = self.system.to_dict(self.sim_time_s)

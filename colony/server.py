@@ -55,6 +55,12 @@ class StartHaulBody(BaseModel):
     contract_id: Optional[str] = None
 
 
+class OrderBody(BaseModel):
+    unit_id: str
+    order: str  # survey | mine | move | idle
+    target_id: str = ""
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "service": "colony", "version": "0.1.0"}
@@ -131,6 +137,14 @@ def start_haul(body: StartHaulBody):
             body.option_index,
             body.contract_id,
         )
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/order")
+def order(body: OrderBody):
+    try:
+        return room().issue_order(body.unit_id, body.order, body.target_id)
     except Exception as e:
         raise HTTPException(400, str(e)) from e
 

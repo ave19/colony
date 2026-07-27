@@ -9,21 +9,22 @@
 <body>
   <div id="app">
     <header>
-      <h1><span>COLONY</span> · orbital logistics</h1>
+      <h1><span>COLONY</span></h1>
       <div class="hdr-meta">
-        <div>Phase: <strong id="phase">—</strong></div>
-        <div>Time: <strong id="clock">—</strong></div>
-        <div>Pop: <strong id="pop">—</strong></div>
-        <button type="button" id="btn-warp" class="primary" title="Vote-warp to next event (solo auto-approve)">Warp → event</button>
-        <button type="button" id="btn-refresh">Refresh</button>
+        <span id="phase" class="pill">—</span>
+        <span id="clock" class="pill">—</span>
+        <span id="pop" class="pill">—</span>
+        <button type="button" id="btn-warp" class="primary">Warp → next order</button>
+        <button type="button" id="btn-reset" title="New game">Reset</button>
       </div>
     </header>
 
+    <!-- Fleet outliner -->
     <aside class="left">
       <div id="panel-menu">
-        <h2>Star survey</h2>
-        <p class="muted">You are a colony ship. Pick a destination. Transit commits you — no galaxy map mid-run.</p>
-        <button type="button" id="btn-catalog" class="primary">Scan nearby stars</button>
+        <h2>Choose a star</h2>
+        <p class="muted">You are a colony ship. Commit to a system — distances are real; gas giants take ~a decade per orbit.</p>
+        <button type="button" id="btn-catalog" class="primary">Survey nearby stars</button>
         <div id="catalog"></div>
       </div>
 
@@ -34,11 +35,38 @@
       </div>
 
       <div id="panel-system" hidden>
-        <h2>Selected body</h2>
-        <div id="body-detail" class="empty">Click a body on the map</div>
-        <div id="plan-box" hidden>
-          <h2>Plan a base</h2>
-          <div class="plan-form card">
+        <h2>Fleet</h2>
+        <p class="muted tip">Select a unit, then a body on the map, then an order.</p>
+        <div id="fleet-list"></div>
+
+        <h2>Selected unit</h2>
+        <div id="unit-panel" class="empty">Select a fleet unit</div>
+      </div>
+    </aside>
+
+    <!-- Map -->
+    <section class="main">
+      <canvas id="map"></canvas>
+      <div class="toast" id="toast">Loading…</div>
+      <div class="map-legend" id="map-legend"></div>
+    </section>
+
+    <!-- Target + build choices -->
+    <aside class="right">
+      <div id="right-menu" class="muted">Survey stars to begin.</div>
+      <div id="right-system" hidden>
+        <h2>Target body</h2>
+        <div id="body-panel" class="empty">Click a planet, moon, or belt object</div>
+
+        <div id="orders-panel" hidden>
+          <h2>Orders</h2>
+          <div id="orders" class="choice-grid"></div>
+        </div>
+
+        <div id="build-panel" hidden>
+          <h2>What do you want to build?</h2>
+          <p class="muted">Applies at the target. Spawns project needs — logistics follows.</p>
+          <div class="card">
             <label>Power
               <select id="power-id">
                 <option value="solar">Solar</option>
@@ -48,50 +76,27 @@
             </label>
             <label>Habitation
               <select id="hab-id">
-                <option value="underground">Underground</option>
-                <option value="surface">Surface</option>
+                <option value="underground">Underground habitat</option>
+                <option value="surface">Surface habitat</option>
               </select>
             </label>
-            <div class="row">
-              <button type="button" id="btn-plan" class="primary">Create project → contracts</button>
-            </div>
+            <p class="muted" id="build-hint"></p>
+            <button type="button" id="btn-plan" class="primary">Found project here</button>
           </div>
         </div>
-        <h2>Haul from ark</h2>
-        <div class="card plan-form">
-          <label>Resource
-            <select id="haul-resource"></select>
-          </label>
-          <label>Amount (t)
-            <input id="haul-amount" type="number" value="10" min="0.1" step="1" style="width:100%;margin-top:2px;background:var(--panel2);color:var(--text);border:1px solid #334455;border-radius:6px;padding:6px 10px;" />
-          </label>
-          <label>Destination body id
-            <input id="haul-dest" type="text" placeholder="p0" style="width:100%;margin-top:2px;background:var(--panel2);color:var(--text);border:1px solid #334455;border-radius:6px;padding:6px 10px;" />
-          </label>
-          <div class="row">
-            <button type="button" id="btn-haul-opts">Show transfer options</button>
-          </div>
-          <div id="haul-opts"></div>
-        </div>
+
+        <h2>Active projects</h2>
+        <div id="projects"></div>
+
+        <h2>Open needs</h2>
+        <div id="contracts"></div>
+
+        <details class="drawer">
+          <summary>Ark cargo &amp; events</summary>
+          <div id="ark-stock" class="stock"></div>
+          <div id="events"></div>
+        </details>
       </div>
-    </aside>
-
-    <section class="main">
-      <canvas id="map"></canvas>
-      <div class="toast" id="toast">Loading…</div>
-    </section>
-
-    <aside class="right">
-      <h2>Ark stock</h2>
-      <div id="ark-stock" class="card stock"></div>
-      <h2>Contracts</h2>
-      <div id="contracts"></div>
-      <h2>Projects</h2>
-      <div id="projects"></div>
-      <h2>Hauls</h2>
-      <div id="hauls"></div>
-      <h2>Events</h2>
-      <div id="events"></div>
     </aside>
   </div>
   <script src="/static/app.js"></script>
