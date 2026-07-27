@@ -83,12 +83,16 @@ def test_queue_build_survey_then_order_survey_unlocks_site():
     sat = surveys[0]
 
     body = next(b for b in g.system.bodies if b.kind == "planet" and any(d.resource == "Fe" for d in b.deposits))
-    # Directed search: find sources of iron
-    sat.location_id = body.id
+    # Directed search: find sources of iron (may be en_route first — arrival is scheduled)
     g.issue_order(sat.id, "survey", body.id, resource="Fe")
-    assert sat.status == "working"
     assert sat.order == "survey"
     assert sat.search_resource == "Fe"
+    if sat.status == "en_route":
+        assert any(e.get("kind") == "survey_arrival" for e in g.event_queue())
+        while sat.status == "en_route":
+            g.warp_to_next_event(force=True)
+    assert sat.status == "working"
+    assert sat.location_id == body.id
 
     found = False
     for _ in range(80):
