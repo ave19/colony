@@ -26,6 +26,7 @@ function unitById(id) {
 
 function initMap() {
   const canvas = $("map3d");
+  if (!canvas) throw new Error("map canvas missing");
   map = new SystemMap3D(canvas);
   map.onSelect = (id) => {
     selectedBodyId = id;
@@ -36,9 +37,18 @@ function initMap() {
   };
 }
 
+function renderSafe() {
+  try {
+    render();
+  } catch (e) {
+    console.error(e);
+    $("toast").textContent = "UI error: " + (e && e.message ? e.message : e);
+  }
+}
+
 async function refresh() {
   state = await api("/api/state");
-  render();
+  renderSafe();
 }
 
 function render() {
@@ -67,23 +77,25 @@ function render() {
       `Coasting ${(state.transit_months_left / 12).toFixed(1)} years.`;
   }
 
-  // 3D map
-  if (state.phase === "system" && state.system) {
-    if (!map.systemData || map.systemData.seed !== state.system.seed) {
-      map.setSystem(state.system);
-      map.focusSystem();
-    } else {
-      map.updatePositions(state.system);
+  // 3D map (optional if WebGL/init failed)
+  if (map) {
+    if (state.phase === "system" && state.system) {
+      if (!map.systemData || map.systemData.seed !== state.system.seed) {
+        map.setSystem(state.system);
+        map.focusSystem();
+      } else {
+        map.updatePositions(state.system);
+      }
+      if (selectedBodyId) map.setSelected(selectedBodyId);
+      $("map-hint").textContent =
+        "Drag orbit · Scroll zoom · Click select · Double-click focus planet (see moons)";
+    } else if (state.phase !== "system") {
+      map.clearSystem();
+      $("map-hint").textContent =
+        state.phase === "menu"
+          ? "Open survey archive (left ☰) — map fills once you arrive in-system"
+          : "In transit — warp to arrival to enter the system map";
     }
-    if (selectedBodyId) map.setSelected(selectedBodyId);
-    $("map-hint").textContent =
-      "Drag orbit · Scroll zoom · Click select · Double-click focus planet (see moons)";
-  } else if (state.phase !== "system") {
-    map.clearSystem();
-    $("map-hint").textContent =
-      state.phase === "menu"
-        ? "Open survey archive (left) — map fills once you arrive in-system"
-        : "In transit — warp to arrival to enter the system map";
   }
 
   renderCatalog();
@@ -476,26 +488,37 @@ $("btn-reset").onclick = async () => {
   map.clearSystem();
   render();
 };
-$("btn-focus-system").onclick = () => map.focusSystem();
+$("btn-focus-system").onclick = () => map && map.focusSystem();
 $("btn-focus-sel").onclick = () => {
+  if (!map) return;
   if (selectedBodyId) map.focusBody(selectedBodyId);
   else map.focusSystem();
 };
 
-initMap();
-setInterval(async () => {
-  if (document.hidden) return;
+// Boot: never leave the user stuck on "Loading…" if 3D init fails.
+(async function boot() {
   try {
-    const prevSeed = state?.system?.seed;
-    state = await api("/api/state");
-    // light update without rebuilding whole UI thrash
-    render();
-    if (state?.system && prevSeed === state.system.seed) {
-      map.updatePositions(state.system);
-    }
-  } catch (_) {}
-}, 3000);
-
-refresh().catch((e) => {
-  $("toast").textContent = "API error: " + e.message;
-});
+    initMap();
+  } catch (e) {
+    console.error(e);
+    $("toast").textContent =
+      "3D map failed to start: " + (e && e.message ? e.message : e) +
+      " — panels still work.";
+  }
+  try {
+    await refresh();
+  } catch (e) {
+    $("toast").textContent = "API error: " + (e && e.message ? e.message : e);
+  }
+  setInterval(async () => {
+    if (document.hidden) return;
+    try {
+      const prevSeed = state?.system?.seed;
+      state = await api("/api/state");
+      render();
+      if (map && state?.system && prevSeed === state.system.seed) {
+        map.updatePositions(state.system);
+      }
+    } catch (_) {}
+  }, 3000);
+})();

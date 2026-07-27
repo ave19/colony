@@ -2,8 +2,8 @@
  * Simple Three.js system map: orbit / zoom / pan, focus planet to see moons.
  * Distances use a dual scale: heliocentric √AU, local moon rings exaggerated when focused.
  */
-import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import * as THREE from "/static/vendor/three/three.module.js";
+import { OrbitControls } from "/static/vendor/three/addons/controls/OrbitControls.js";
 
 const AU_SCALE = 12; // scene units per √AU at system scale
 
