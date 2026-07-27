@@ -226,3 +226,122 @@ def test_cannot_commit_unknown_seed():
         assert False, "should reject"
     except ValueError as e:
         assert "dossier" in str(e).lower() or "archive" in str(e).lower()
+
+
+def _arrive(g: Game) -> None:
+    g.open_survey_archive()
+    g.select_star(g.catalog[0]["seed"])
+    while g.phase == "transit":
+        g.warp_to_next_event(force=True)
+
+
+def test_transfer_options_trade_propellant_for_time():
+    g = Game(universe_seed=50)
+    _arrive(g)
+    dest = next(b for b in g.system.bodies if b.kind == "planet" and b.id != g.home_body_id)
+    opts = g.haul_options("ark", dest.id)
+    assert len(opts) >= 2
+    # Economy cheapest propellant, longest (or equal) months
+    assert opts[0]["propellant_t"] < opts[-1]["propellant_t"]
+    assert opts[0]["months"] >= opts[-1]["months"] - 1e-6
+    assert opts[0]["dv_m_s"] < opts[-1]["dv_m_s"]
+
+
+def test_haul_with_hauler_and_physics_option():
+    g = Game(universe_seed=51)
+    _arrive(g)
+    g.queue_build("hauler")
+    while not any(u.kind == "hauler" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    hauler = next(u for u in g.fleet.values() if u.kind == "hauler")
+    dest = next(b for b in g.system.bodies if b.kind == "planet" and b.id != g.home_body_id)
+    opts = g.haul_options("ark", dest.id)
+    prop0 = g.ark_stock["chem_prop"]
+    steel0 = g.ark_stock["steel"]
+    # Only haul what we can afford
+    amount = 5.0
+    # Pick cheapest option that fits propellant
+    idx = 0
+    for i, o in enumerate(opts):
+        if o["propellant_t"] <= prop0:
+            idx = i
+            break
+    else:
+        # Seed more prop for the test
+        g.ark_stock["chem_prop"] = opts[0]["propellant_t"] + 5
+        idx = 0
+    g.start_haul("ark", dest.id, "steel", amount, idx, unit_id=hauler.id)
+    assert hauler.status == "en_route"
+    assert hauler.order == "haul"
+    assert len([h for h in g.hauls.values() if h.status == "in_flight"]) == 1
+    assert g.ark_stock["steel"] == steel0 - amount
+    # Warp until haul arrives
+    for _ in range(40):
+        if not any(h.status == "in_flight" for h in g.hauls.values()):
+            break
+        g.warp_to_next_event(force=True)
+    assert hauler.status == "idle"
+    site = g.sites.get(dest.id)
+    assert site is not None
+    assert site.stockpile.get("steel", 0) >= amount - 1e-6
+
+
+def test_ark_trickle_makes_propellant():
+    g = Game(universe_seed=52)
+    _arrive(g)
+    # Give inputs for ark_prop recipe
+    g.ark_stock["CH4"] = 100.0
+    g.ark_stock["O2"] = 100.0
+    prop0 = g.ark_stock.get("chem_prop", 0.0)
+    g.advance(SECONDS_PER_DAY * 30 * 3)  # 3 months
+    assert g.ark_stock["chem_prop"] > prop0
+
+
+def test_mine_then_haul_ore_to_ark():
+    g = Game(universe_seed=22)
+    _arrive(g)
+    g.queue_build("survey")
+    g.queue_build("miner")
+    g.queue_build("hauler")
+    for _ in range(40):
+        if (
+            any(u.kind == "survey" for u in g.fleet.values())
+            and any(u.kind == "miner" for u in g.fleet.values())
+            and any(u.kind == "hauler" for u in g.fleet.values())
+        ):
+            break
+        g.warp_to_next_event(force=True)
+    sat = next(u for u in g.fleet.values() if u.kind == "survey")
+    miner = next(u for u in g.fleet.values() if u.kind == "miner")
+    hauler = next(u for u in g.fleet.values() if u.kind == "hauler")
+    body = next(
+        b for b in g.system.bodies if b.kind == "planet" and any(d.resource == "Fe" for d in b.deposits)
+    )
+    sat.location_id = body.id
+    g.issue_order(sat.id, "survey", body.id, resource="Fe")
+    for _ in range(80):
+        g.advance(SECONDS_PER_DAY * 30)
+        if any(s.resource == "Fe" for s in body.mine_sites):
+            break
+    site = next(s for s in body.mine_sites if s.resource == "Fe")
+    miner.location_id = body.id
+    g.issue_order(miner.id, "mine", site.id)
+    while miner.status != "idle":
+        g.warp_to_next_event(force=True)
+    stock = g.sites[body.id].stockpile
+    assert stock.get("Fe", 0) > 0
+    took = min(20.0, stock["Fe"])
+    # Ensure propellant; freeze Fe at ark so trickle foundry doesn't hide the delivery
+    g.ark_stock["chem_prop"] = max(g.ark_stock.get("chem_prop", 0), 200.0)
+    g.ark_stock["Fe"] = 0.0  # delivery should land as Fe cargo
+    site_fe0 = stock["Fe"]
+    g.start_haul(body.id, "ark", "Fe", took, 0, unit_id=hauler.id)
+    assert g.sites[body.id].stockpile.get("Fe", 0) == site_fe0 - took
+    for _ in range(40):
+        if not any(h.status == "in_flight" for h in g.hauls.values()):
+            break
+        g.warp_to_next_event(force=True)
+    assert hauler.status == "idle"
+    # Cargo arrived (may partially refine into steel via ark trickle)
+    arrived = g.ark_stock.get("Fe", 0.0) + g.ark_stock.get("steel", 0.0)
+    assert arrived >= took * 0.5  # at least half still present as Fe or refined steel

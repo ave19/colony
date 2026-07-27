@@ -146,6 +146,8 @@ function render() {
   renderBodyTree();
   renderBodyPanel();
   renderOrders();
+  renderHaulPanel();
+  renderHaulsList();
   renderBuild();
   renderProjects();
   renderContracts();
@@ -571,6 +573,14 @@ function renderBodyPanel() {
       <p><strong>Mass</strong> ${b.mass_earth ?? "—"} M⊕</p>`;
   }
 
+  const stock = b.site_stockpile || {};
+  const stockLines = Object.keys(stock)
+    .sort()
+    .map((k) => `· ${k}: ${stock[k]} t`)
+    .join("<br/>");
+  const bld = (b.site_buildings || []).filter((x) => x && x !== "ark");
+  const bldLine = bld.length ? bld.join(", ") : "";
+
   el.innerHTML = `
     <h3>${b.name}</h3>
     <p class="muted">${b.kind}${b.planet_class ? " / " + b.planet_class : ""} · ${b.density_hint || ""}</p>
@@ -583,6 +593,9 @@ function renderBodyPanel() {
     <p>${depLines || '<span class="muted">No composition intel yet</span>'}</p>
     <h2>Extraction sites</h2>
     <p>${sites || '<span class="muted">None yet — keep searching</span>'}</p>
+    <h2>Surface stockpile</h2>
+    <p>${stockLines || '<span class="muted">Empty — mine or deliver here</span>'}</p>
+    ${bldLine ? `<p class="muted">Buildings: ${bldLine}</p>` : ""}
   `;
   const fb = $("btn-focus-body");
   if (fb) fb.onclick = () => map && map.focusBody(b.id);
@@ -681,7 +694,26 @@ async function renderOrders() {
       );
     }
   }
+
+  // Hauler shortcut: open cargo panel with this body as dest
+  if (caps.includes("haul") && !busy && u.kind !== "ark") {
+    html += `<h2>Logistics</h2>`;
+    html += `<button type="button" class="order" id="btn-open-haul">Plan cargo transfer involving ${b.name}</button>`;
+  }
+
   el.innerHTML = html;
+
+  const openHaul = $("btn-open-haul");
+  if (openHaul) {
+    openHaul.onclick = () => {
+      const panel = $("haul-panel");
+      if (panel) {
+        panel.hidden = false;
+        panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+      renderHaulPanel({ preferDest: b.id });
+    };
+  }
 
   function btn(order, label, target, resource, enabled) {
     return `<button type="button" class="order" data-order="${order}" data-target="${target}" data-resource="${resource || ""}" ${
@@ -734,6 +766,197 @@ function renderBuild() {
   };
 }
 
+function renderHaulsList() {
+  const el = $("hauls-list");
+  if (!el || state.phase !== "system") {
+    if (el) el.innerHTML = "";
+    return;
+  }
+  const hauls = state.hauls || [];
+  if (!hauls.length) {
+    el.innerHTML = '<div class="queue-empty">No cargo in flight.</div>';
+    return;
+  }
+  const resNames = (state.tech && state.tech.resources) || {};
+  el.innerHTML = hauls
+    .map((h) => {
+      const res = resNames[h.resource] || h.resource;
+      const dest = bodyById(h.dest_id);
+      const destName =
+        h.dest_id === "ark" || h.dest_id === "ark_orbit"
+          ? "ark"
+          : dest
+            ? dest.name
+            : h.dest_id;
+      const total = h.months_total || 1;
+      const left = Math.max(0, h.months_left || 0);
+      const done = Math.min(100, ((total - left) / total) * 100);
+      const unit = unitById(h.unit_id);
+      return `<div class="queue-job">
+        <div class="title">${h.amount_t} t ${res} → ${destName}</div>
+        <div class="meta">${h.option_name} · Δv ${Math.round(h.dv_m_s)} m/s · ${h.propellant_t} t prop${
+          unit ? " · " + unit.name : ""
+        } · ${left.toFixed(1)} mo left</div>
+        <div class="queue-bar"><i style="width:${done.toFixed(1)}%"></i></div>
+      </div>`;
+    })
+    .join("");
+}
+
+/** Cargo transfer panel — Economy / Expedited / Sprint. */
+function renderHaulPanel(opts = {}) {
+  const panel = $("haul-panel");
+  if (!panel || state.phase !== "system") {
+    if (panel) panel.hidden = true;
+    return;
+  }
+  const u = unitById(selectedUnitId);
+  const canHaul =
+    u &&
+    (u.capabilities || []).includes("haul") &&
+    (u.status === "idle" || u.kind === "ark");
+  // Show when a hauler/ark is selected, or user opened it from a body task
+  if (!canHaul && !opts.forceOpen) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  const bodies = (state.system && state.system.bodies) || [];
+  const originSel = $("haul-origin");
+  const destSel = $("haul-dest");
+  const resSel = $("haul-resource");
+  const amountInp = $("haul-amount");
+  const optsEl = $("haul-opts");
+  if (!originSel || !destSel || !resSel || !amountInp || !optsEl) return;
+
+  const prevOrigin = originSel.value;
+  const prevDest = destSel.value || opts.preferDest || selectedBodyId || "";
+  const prevRes = resSel.value;
+
+  // Origins: ark + bodies with stock
+  const origins = [{ id: "ark", label: "Colony Ark (orbit stock)" }];
+  for (const b of bodies) {
+    const stock = b.site_stockpile || {};
+    const keys = Object.keys(stock).filter((k) => stock[k] > 0);
+    if (keys.length) {
+      origins.push({
+        id: b.id,
+        label: `${b.name} stockpile (${keys.map((k) => k + " " + stock[k]).join(", ")})`,
+      });
+    }
+  }
+  originSel.innerHTML = origins
+    .map((o) => `<option value="${o.id}">${o.label}</option>`)
+    .join("");
+  if (origins.some((o) => o.id === prevOrigin)) originSel.value = prevOrigin;
+  else if (u && u.kind !== "ark" && origins.some((o) => o.id === u.location_id)) {
+    originSel.value = u.location_id;
+  }
+
+  destSel.innerHTML =
+    `<option value="ark">Colony Ark</option>` +
+    bodies
+      .map((b) => `<option value="${b.id}">${b.name} (${b.kind})</option>`)
+      .join("");
+  if (prevDest && [...destSel.options].some((o) => o.value === prevDest)) {
+    destSel.value = prevDest;
+  } else if (selectedBodyId) {
+    destSel.value = selectedBodyId;
+  }
+
+  function fillResources() {
+    const oid = originSel.value;
+    let stock = {};
+    if (oid === "ark") stock = state.ark_stock || {};
+    else {
+      const b = bodyById(oid);
+      stock = (b && b.site_stockpile) || {};
+    }
+    const keys = Object.keys(stock)
+      .filter((k) => stock[k] > 0.05 && k !== "chem_prop")
+      .sort();
+    // Always list common cargo even if zero so player sees the menu; disable empty later
+    const extras = ["Fe", "steel", "H2O", "CH4", "panel", "chip", "Al", "Si"];
+    const all = [...new Set([...keys, ...extras])];
+    resSel.innerHTML = all
+      .map((k) => {
+        const have = stock[k] || 0;
+        return `<option value="${k}" ${have < 0.05 ? "disabled" : ""}>${k} (${have.toFixed(1)} t)</option>`;
+      })
+      .join("");
+    if (all.includes(prevRes) && (stock[prevRes] || 0) > 0.05) resSel.value = prevRes;
+    else if (keys[0]) resSel.value = keys[0];
+  }
+  fillResources();
+  originSel.onchange = () => {
+    fillResources();
+    optsEl.innerHTML = "";
+  };
+  destSel.onchange = () => {
+    optsEl.innerHTML = "";
+  };
+
+  $("btn-haul-opts").onclick = async () => {
+    try {
+      const origin = originSel.value;
+      const dest = destSel.value;
+      if (origin === dest) {
+        optsEl.innerHTML = '<p class="muted">Origin and destination must differ.</p>';
+        return;
+      }
+      const data = await api("/api/haul_options", {
+        method: "POST",
+        body: JSON.stringify({ origin_id: origin, dest_id: dest }),
+      });
+      const options = data.options || [];
+      if (!options.length) {
+        optsEl.innerHTML = '<p class="muted">No transfer path.</p>';
+        return;
+      }
+      const amount = Math.max(0.1, Number(amountInp.value) || 10);
+      const resource = resSel.value;
+      optsEl.innerHTML = options
+        .map(
+          (o, i) => `<button type="button" class="order haul-opt" data-idx="${i}">
+          <strong>${o.name}</strong><br/>
+          <span class="muted">${o.propellant_t} t prop · ${o.months.toFixed(1)} mo · Δv ${Math.round(
+            o.dv_m_s
+          )} m/s</span><br/>
+          <span class="muted">${o.description || ""}</span>
+        </button>`
+        )
+        .join("");
+      optsEl.querySelectorAll(".haul-opt").forEach((btn) => {
+        btn.onclick = async () => {
+          try {
+            const contractId = panel.getAttribute("data-contract") || null;
+            state = await api("/api/start_haul", {
+              method: "POST",
+              body: JSON.stringify({
+                origin_id: origin,
+                dest_id: dest,
+                resource,
+                amount_t: amount,
+                option_index: Number(btn.dataset.idx),
+                unit_id: u && u.kind !== "ark" ? u.id : "",
+                contract_id: contractId || undefined,
+              }),
+            });
+            panel.removeAttribute("data-contract");
+            optsEl.innerHTML = "";
+            render();
+          } catch (e) {
+            alert(String(e.message || e).slice(0, 320));
+          }
+        };
+      });
+    } catch (e) {
+      optsEl.innerHTML = `<p class="muted">${String(e.message || e).slice(0, 200)}</p>`;
+    }
+  };
+}
+
 function renderProjects() {
   const el = $("projects");
   if (!el) return;
@@ -752,15 +975,27 @@ function renderContracts() {
   const el = $("contracts");
   if (!el) return;
   const open = (state.contracts || []).filter((c) => c.status === "open");
+  const resNames = (state.tech && state.tech.resources) || {};
   el.innerHTML = open.length
     ? open
-        .map(
-          (c) => `<div class="card">
+        .map((c) => {
+          const proj = (state.projects || []).find((p) => p.id === c.project_id);
+          const body = proj ? bodyById(proj.body_id) : null;
+          return `<div class="card">
       <h3>${c.title}</h3>
-      <p>${c.resource_name}: ${c.delivered_t}/${c.amount_t} t</p>
-      <button data-deliver="${c.id}">From ark cargo</button>
-    </div>`
-        )
+      <p>${c.resource_name || resNames[c.resource] || c.resource}: ${c.delivered_t}/${c.amount_t} t</p>
+      ${c.note ? `<p class="muted">${c.note}</p>` : ""}
+      <button data-deliver="${c.id}">From ark (local bootstrap)</button>
+      ${
+        body
+          ? `<button data-haul-contract="${c.id}" data-dest="${proj.body_id}" data-res="${c.resource}" data-amt="${Math.max(
+              0.1,
+              c.amount_t - c.delivered_t
+            )}">Haul to ${body.name}…</button>`
+          : ""
+      }
+    </div>`;
+        })
         .join("")
     : '<p class="empty">No open needs</p>';
   el.querySelectorAll("[data-deliver]").forEach((btn) => {
@@ -774,6 +1009,36 @@ function renderContracts() {
       } catch (e) {
         alert(String(e.message || e).slice(0, 280));
       }
+    };
+  });
+  el.querySelectorAll("[data-haul-contract]").forEach((btn) => {
+    btn.onclick = async () => {
+      // Prefill haul panel: ark → project body for this need
+      selectedBodyId = btn.dataset.dest;
+      const freeHauler = (state.fleet || []).find(
+        (u) => u.kind === "hauler" && u.status === "idle"
+      );
+      if (freeHauler) selectedUnitId = freeHauler.id;
+      else selectedUnitId = "ark";
+      renderHaulPanel({ preferDest: btn.dataset.dest, forceOpen: true });
+      const resSel = $("haul-resource");
+      const amountInp = $("haul-amount");
+      const originSel = $("haul-origin");
+      const destSel = $("haul-dest");
+      if (originSel) originSel.value = "ark";
+      if (destSel) destSel.value = btn.dataset.dest;
+      if (resSel) {
+        // re-render fills options; set after
+        setTimeout(() => {
+          if ($("haul-resource")) $("haul-resource").value = btn.dataset.res;
+          if ($("haul-amount")) $("haul-amount").value = btn.dataset.amt;
+          $("haul-panel")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }, 0);
+      }
+      if (amountInp) amountInp.value = btn.dataset.amt;
+      // Store contract id for next start_haul via data on panel
+      $("haul-panel")?.setAttribute("data-contract", btn.dataset.haulContract);
+      $("panel-right").classList.remove("collapsed");
     };
   });
 }

@@ -58,6 +58,8 @@
         <div id="panel-system" hidden>
           <h2>Event schedule</h2>
           <div id="event-schedule" class="queue-list"></div>
+          <h2>Active hauls</h2>
+          <div id="hauls-list" class="queue-list"></div>
           <h2>Fleet</h2>
           <p class="muted">Select a unit. Select the <strong>Colony Ark</strong> to manage fabrication.</p>
           <div id="fleet-list"></div>
@@ -97,6 +99,28 @@
           <div id="orders-panel" hidden>
             <h2>Tasks</h2>
             <div id="orders" class="choice-grid"></div>
+          </div>
+          <div id="haul-panel" hidden>
+            <h2>Cargo transfer</h2>
+            <p class="muted">Physics routes: propellant vs flight time. Pick a destination body, then a transfer option.</p>
+            <div class="card">
+              <label>Origin
+                <select id="haul-origin"></select>
+              </label>
+              <label>Destination
+                <select id="haul-dest"></select>
+              </label>
+              <label>Cargo
+                <select id="haul-resource"></select>
+              </label>
+              <label>Amount (t)
+                <input id="haul-amount" type="number" value="10" min="0.1" step="1" />
+              </label>
+              <button type="button" id="btn-haul-opts" class="primary" style="width:100%;margin-top:10px">
+                Show transfer options
+              </button>
+              <div id="haul-opts" class="choice-grid" style="margin-top:8px"></div>
+            </div>
           </div>
           <div id="build-panel" hidden>
             <h2>Build here</h2>

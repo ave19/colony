@@ -53,6 +53,7 @@ class StartHaulBody(BaseModel):
     amount_t: float = Field(gt=0)
     option_index: int = 0
     contract_id: Optional[str] = None
+    unit_id: str = ""  # optional hauler; else first free hauler / ark
 
 
 class OrderBody(BaseModel):
@@ -179,7 +180,19 @@ def start_haul(body: StartHaulBody):
             body.amount_t,
             body.option_index,
             body.contract_id,
+            unit_id=body.unit_id or "",
         )
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/stocks")
+def stocks(body: HaulOptionsBody):
+    """Stockpile at a location (reuse origin_id field)."""
+    try:
+        room().catch_up()
+        loc = body.origin_id or body.dest_id
+        return {"location_id": loc, "stock": room().stocks_at(loc)}
     except Exception as e:
         raise HTTPException(400, str(e)) from e
 

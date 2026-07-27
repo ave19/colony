@@ -95,6 +95,8 @@ class Haul:
     months_left: float
     dv_m_s: float
     status: str = "in_flight"  # in_flight, arrived
+    unit_id: str = ""  # hauler carrying this cargo
+    contract_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -109,6 +111,8 @@ class Haul:
             "months_left": round(self.months_left, 2),
             "dv_m_s": round(self.dv_m_s, 1),
             "status": self.status,
+            "unit_id": self.unit_id,
+            "contract_id": self.contract_id,
         }
 
 
@@ -267,6 +271,9 @@ class Game:
                 self._complete_haul(h)
 
         for u in list(self.fleet.values()):
+            # Haulers on cargo runs are driven by Haul.months_left / _complete_haul
+            if u.order == "haul" and u.status == "en_route":
+                continue
             if u.status == "en_route" and u.months_left > 0:
                 u.months_left -= months
                 if u.months_left <= 0:
@@ -281,8 +288,10 @@ class Game:
 
         self._tick_builds(months)
         self._tick_ark_scan_goals(months)
-        # No auto ark consumption of seed stock. Sites tick only with buildings.
+        # Ark trickle fabs (slow basics) + site industry
+        self._ark_tick(months)
         self._site_tick(months)
+        self._tick_population(months)
         return months
 
     # --- Ark system-wide scan goals -----------------------------------------
@@ -596,11 +605,17 @@ class Game:
             )
         for h in self.hauls.values():
             if h.status == "in_flight" and h.months_left > 0:
+                res_name = RESOURCE_NAMES.get(h.resource, h.resource)
+                dest = self._location_label(h.dest_id)
+                unit = self.fleet.get(h.unit_id)
+                who = f"{unit.name}: " if unit else ""
                 items.append(
                     {
                         "kind": "haul",
-                        "label": f"Haul arrives: {h.amount_t:.0f} t {h.resource}",
+                        "label": f"{who}{h.amount_t:.0f} t {res_name} → {dest} ({h.option_name})",
                         "months": h.months_left,
+                        "unit_id": h.unit_id,
+                        "haul_id": h.id,
                     }
                 )
         for job in self.build_queue:
@@ -1280,22 +1295,91 @@ class Game:
         amount_t: float,
         option_index: int = 0,
         contract_id: Optional[str] = None,
+        unit_id: str = "",
     ) -> dict:
+        """
+        Launch a physics transfer: cargo + chem_prop from origin stock.
+        Prefer a free hauler (unit_id or first idle CAP_HAUL) — it rides the route.
+        Transfer options: Economy / Expedited / Sprint (propellant vs months).
+        """
         self.catch_up()
+        if self.phase != "system":
+            raise ValueError("only after arrival")
+        if origin_id == dest_id or (
+            origin_id in ("ark", "ark_orbit") and dest_id in ("ark", "ark_orbit")
+        ):
+            raise ValueError("origin and destination must differ")
+        # Normalize ark aliases
+        if origin_id == "ark_orbit":
+            origin_id = "ark"
+        if dest_id == "ark_orbit":
+            dest_id = "ark"
+
         opts = self.haul_options(origin_id, dest_id)
         if not opts or option_index < 0 or option_index >= len(opts):
             raise ValueError("bad transfer option")
         opt = opts[option_index]
-        # take cargo + propellant from origin stock (ark or site)
+
+        # Resolve hauler: explicit unit, else first idle hauler, else ark if it has CAP_HAUL
+        hauler: Optional[FleetUnit] = None
+        if unit_id:
+            hauler = self.fleet.get(unit_id)
+            if not hauler:
+                raise ValueError("unknown unit")
+            if CAP_HAUL not in hauler.capabilities:
+                raise ValueError(f"{hauler.name} cannot haul")
+            if hauler.status != "idle" and not (
+                hauler.kind == "ark" and hauler.status == "idle"
+            ):
+                if hauler.status != "idle":
+                    raise ValueError(f"{hauler.name} is busy")
+        else:
+            hauler = next(
+                (
+                    u
+                    for u in self.fleet.values()
+                    if CAP_HAUL in u.capabilities
+                    and u.status == "idle"
+                    and u.kind == "hauler"
+                ),
+                None,
+            )
+            if not hauler:
+                # Ark can bootstrap a single local-ish haul without a dedicated tug
+                hauler = next(
+                    (
+                        u
+                        for u in self.fleet.values()
+                        if u.kind == "ark" and CAP_HAUL in u.capabilities
+                    ),
+                    None,
+                )
+        if not hauler:
+            raise ValueError("no free hauler — authorize a Hauler build on the ark")
+
         stock = self._stock_for(origin_id)
-        if stock.get(resource, 0.0) < amount_t:
-            raise ValueError(f"insufficient {resource} at origin")
-        prop = opt["propellant_t"]
-        if stock.get("chem_prop", 0.0) < prop:
-            raise ValueError(f"need {prop:.1f} t chem_prop for this transfer; have {stock.get('chem_prop', 0):.1f}")
-        stock[resource] -= amount_t
-        stock["chem_prop"] -= prop
+        if stock.get(resource, 0.0) + 1e-9 < amount_t:
+            raise ValueError(
+                f"insufficient {RESOURCE_NAMES.get(resource, resource)} at origin "
+                f"(have {stock.get(resource, 0.0):.1f} t)"
+            )
+        prop = float(opt["propellant_t"])
+        # Propellant: prefer origin stock, else ark chem_prop for site→site hops
+        prop_stock = stock
+        if prop_stock.get("chem_prop", 0.0) + 1e-9 < prop:
+            if origin_id not in ("ark", "ark_orbit") and self.ark_stock.get("chem_prop", 0.0) + 1e-9 >= prop:
+                prop_stock = self.ark_stock
+            else:
+                have = stock.get("chem_prop", 0.0)
+                raise ValueError(
+                    f"need {prop:.1f} t chem_prop for {opt['name']}; have {have:.1f} t at origin"
+                )
+
+        stock[resource] = stock.get(resource, 0.0) - amount_t
+        prop_stock["chem_prop"] = prop_stock.get("chem_prop", 0.0) - prop
+
         hid = _id()
+        months = float(opt["months"])
         self.hauls[hid] = Haul(
             id=hid,
             origin_id=origin_id,
@@ -1304,18 +1388,36 @@ class Game:
             amount_t=amount_t,
             option_name=opt["name"],
             propellant_t=prop,
-            months_total=opt["months"],
-            months_left=opt["months"],
-            dv_m_s=opt["dv_m_s"],
+            months_total=months,
+            months_left=months,
+            dv_m_s=float(opt["dv_m_s"]),
+            unit_id=hauler.id,
+            contract_id=contract_id,
         )
-        if contract_id:
-            # remember linkage in note via events
-            self._log("haul", f"Haul {amount_t:.1f} t {resource} via {opt['name']} ({opt['months']:.1f} mo, {prop:.1f} t prop). Linked contract {contract_id}.")
-        else:
-            self._log("haul", f"Haul {amount_t:.1f} t {resource} via {opt['name']} ({opt['months']:.1f} mo, {prop:.1f} t prop).")
-        # stash contract id on haul via dynamic attr
-        self.hauls[hid].__dict__["contract_id"] = contract_id
+        # Hauler rides the cargo (ark stays home as command node)
+        if hauler.kind != "ark":
+            hauler.status = "en_route"
+            hauler.order = "haul"
+            hauler.target_id = dest_id if dest_id != "ark" else self.home_body_id
+            hauler.months_left = months
+        res_name = RESOURCE_NAMES.get(resource, resource)
+        dest_label = self._location_label(dest_id)
+        link = f" (contract)" if contract_id else ""
+        self._log(
+            "haul",
+            f"{hauler.name}: {amount_t:.1f} t {res_name} → {dest_label} via {opt['name']} "
+            f"({months:.1f} mo, {prop:.1f} t prop, Δv {opt['dv_m_s']:.0f} m/s){link}.",
+        )
         return self.snapshot()
+
+    def _location_label(self, location_id: str) -> str:
+        if location_id in ("ark", "ark_orbit"):
+            return "ark"
+        if self.system:
+            b = self.system.body_by_id(location_id)
+            if b:
+                return b.name
+        return location_id
 
     def _stock_for(self, location_id: str) -> Dict[str, float]:
         if location_id in ("ark", "ark_orbit"):
@@ -1323,17 +1425,34 @@ class Game:
         site = self.sites.setdefault(location_id, Site(body_id=location_id))
         return site.stockpile
 
+    def stocks_at(self, location_id: str) -> Dict[str, float]:
+        """Public view of stockpile at a location (for haul UI)."""
+        return {k: round(v, 2) for k, v in self._stock_for(location_id).items() if v > 1e-6}
+
     def _complete_haul(self, h: Haul) -> None:
         h.status = "arrived"
         h.months_left = 0.0
-        dest_stock = self._stock_for(h.dest_id if h.dest_id != "ark_orbit" else "ark")
         if h.dest_id in ("ark", "ark_orbit"):
             dest_stock = self.ark_stock
         else:
             site = self.sites.setdefault(h.dest_id, Site(body_id=h.dest_id))
             dest_stock = site.stockpile
         dest_stock[h.resource] = dest_stock.get(h.resource, 0.0) + h.amount_t
-        cid = h.__dict__.get("contract_id")
+
+        # Free hauler at destination
+        if h.unit_id and h.unit_id in self.fleet:
+            u = self.fleet[h.unit_id]
+            if u.kind != "ark":
+                if h.dest_id in ("ark", "ark_orbit"):
+                    u.location_id = self.home_body_id or u.location_id
+                else:
+                    u.location_id = h.dest_id
+                u.status = "idle"
+                u.order = ""
+                u.target_id = ""
+                u.months_left = 0.0
+
+        cid = h.contract_id
         if cid and cid in self.contracts:
             c = self.contracts[cid]
             if c.status == "open":
@@ -1345,17 +1464,23 @@ class Game:
                     proj = self.projects.get(c.project_id)
                     if proj:
                         self._try_complete_project(proj)
-        self._log("haul", f"Haul arrived: {h.amount_t:.1f} t {h.resource} → {h.dest_id}.")
+        dest_label = self._location_label(h.dest_id)
+        self._log(
+            "haul",
+            f"Haul arrived: {h.amount_t:.1f} t {RESOURCE_NAMES.get(h.resource, h.resource)} → {dest_label}.",
+        )
 
     def _ark_tick(self, months: float) -> None:
-        """Slow ark recipes if inputs available."""
+        """Slow ark recipes if inputs available — bootstrap, never zero forever."""
+        if months <= 0:
+            return
         for rid in ("ark_steel", "ark_chip", "ark_panel", "ark_prop"):
-            recipe = RECIPES[rid]
-            # fractional batches
+            recipe = RECIPES.get(rid)
+            if not recipe:
+                continue
             batches = months / max(recipe.months, 1e-6)
             if batches <= 0:
                 continue
-            # limit by inputs
             max_b = batches
             for res, need in recipe.inputs.items():
                 have = self.ark_stock.get(res, 0.0)
@@ -1367,6 +1492,28 @@ class Game:
                 self.ark_stock[res] = self.ark_stock.get(res, 0.0) - need * max_b
             for res, out in recipe.outputs.items():
                 self.ark_stock[res] = self.ark_stock.get(res, 0.0) + out * max_b
+
+    def _tick_population(self, months: float) -> None:
+        """
+        Natural growth only when habitat volume exists off-ark.
+        Ark sustains the founding 10k forever; growth needs settlement.
+        """
+        if months <= 0:
+            return
+        hab_sites = sum(
+            1
+            for s in self.sites.values()
+            if s.body_id != "ark_orbit" and "habitat" in s.buildings
+        )
+        if hab_sites <= 0:
+            return
+        # ~1.2% / year per habitat site, soft cap far away
+        rate_per_year = 0.012 * hab_sites
+        growth = self.population * rate_per_year * (months / 12.0)
+        # Soft approach toward 2e6 * hab_sites
+        cap = 2_000_000.0 * hab_sites + ARK_POPULATION
+        room = max(0.0, cap - self.population)
+        self.population = min(cap, self.population + min(growth, room))
 
     def _site_tick(self, months: float) -> None:
         if not self.system:
@@ -1418,7 +1565,7 @@ class Game:
             "survey_archive_count": len(self.survey_archive),
             "projects": [p.to_dict() for p in self.projects.values()],
             "contracts": [c.to_dict() for c in self.contracts.values()],
-            "hauls": [h.to_dict() for h in self.hauls.values()],
+            "hauls": [h.to_dict() for h in self.hauls.values() if h.status == "in_flight"],
             "fleet": [u.to_dict() for u in self.fleet.values()],
             "builds": [j.to_dict() for j in self.build_queue],
             "sites": {k: v.to_dict() for k, v in self.sites.items()},
@@ -1432,6 +1579,7 @@ class Game:
             "ark_scan_goal_specs": self.ARK_SCAN_GOAL_SPECS,
             "hab_intel": dict(self.hab_intel),
             "body_tree": self.body_tree() if self.phase == "system" else [],
+            "home_body_id": self.home_body_id,
             "build_options": {
                 "power": {k: {"name": v["name"], "description": v["description"]} for k, v in POWER_OPTIONS.items()},
                 "hab": {k: {"name": v["name"], "description": v["description"]} for k, v in HAB_OPTIONS.items()},
@@ -1439,9 +1587,18 @@ class Game:
         }
         if self.system:
             data["system"] = self.system.to_dict(self.sim_time_s)
-            # attach hab_intel onto body dicts for UI convenience
+            # attach hab_intel + site stockpile onto body dicts for UI convenience
             for b in data["system"].get("bodies", []):
                 b["hab_intel"] = self.hab_intel.get(b["id"], 0)
+                site = self.sites.get(b["id"])
+                if site:
+                    b["site_stockpile"] = {
+                        k: round(v, 2) for k, v in site.stockpile.items() if v > 1e-6
+                    }
+                    b["site_buildings"] = list(site.buildings)
+                else:
+                    b["site_stockpile"] = {}
+                    b["site_buildings"] = []
         return data
 
 

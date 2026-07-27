@@ -155,7 +155,7 @@ html, body {
 }
 .float-panel.collapsed .panel-body { display: none; }
 
-button, select {
+button, select, input[type="number"], input[type="text"] {
   background: rgba(20, 32, 48, 0.9);
   color: var(--text);
   border: 1px solid #2a3a4c;
@@ -163,6 +163,11 @@ button, select {
   padding: 7px 11px;
   cursor: pointer;
   font-size: 0.82rem;
+}
+input[type="number"], input[type="text"] {
+  cursor: text;
+  width: 100%;
+  margin-top: 4px;
 }
 button:hover { border-color: var(--accent); }
 button.primary { background: #153554; border-color: var(--accent); }

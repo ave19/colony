@@ -10,8 +10,11 @@ You lead a colony ship into a system that already has remote survey data on file
 2. **Commit** to a dossier → multi-year transit.
 3. **Arrive materials-only** — people, know-how, seed stock. **No** pre-built survey sats / miners / haulers.
 4. **Authorize builds** on the ark (survey sat, miner, hauler) — materials + time.
-5. **Warp** to complete fabrication and orders.
-6. **Map-first** — orbit/zoom/focus in 3D; order units to bodies; survey deepens over time until **mine sites** unlock; mine sites only.
+5. **Ark scan goals** (when ark selected) — continuous system search for habitables, Fe, ice, belt, CH₄.
+6. **Order units** — select unit + body: scan moon / find sources of X / extract at a mine site.
+7. **Found a project** → contracts (needs). Bootstrap with ark cargo, or **haul** with transfer options.
+8. **Cargo transfers** — Economy (Hohmann) / Expedited / Sprint: propellant vs months + real Δv.
+9. **Warp** advances the event queue (fab, arrivals, survey checkpoints, hauls). Idle warp skips nothing.
 
 ## Run
 
@@ -31,17 +34,23 @@ Open **http://localhost:8765/**
 | POST | `/api/open_archive` or `/api/catalog` | View survey dossiers |
 | POST | `/api/select_star` | `{"seed": N}` commit dossier |
 | POST | `/api/build` | `{"unit_kind": "survey"\|"miner"\|"hauler"}` |
+| POST | `/api/ark_scan_goal` | Toggle ark system-wide scan goal |
 | POST | `/api/order` | unit order (survey/mine/move/idle) |
-| POST | `/api/warp` | Advance to next event (fab, transit, survey slices, …) |
+| POST | `/api/haul_options` | Transfer menu (origin → dest) |
+| POST | `/api/start_haul` | Launch haul (option index, optional hauler + contract) |
+| POST | `/api/deliver_ark` | Instant local contract fill from ark stock |
+| POST | `/api/plan_base` | Found project → contracts |
+| POST | `/api/warp` | Advance to next event (`force` for long jumps) |
 
-**Time:** sim runs real-time 1:1 with Earth seconds. Use **Warp** for the event queue — do not sit through multi-month fab in wall clock.
+**Time:** sim runs real-time 1:1 with Earth seconds. Use **Warp** for the event queue — do not sit through multi-month fab in wall clock. Jumps longer than ~1 week ask for confirmation.
 
 ## Design docs
 
 - [docs/PLAYABLE_LADDER.md](docs/PLAYABLE_LADDER.md) — A→B→C milestones
 - [docs/TECH_BOOK_v1.md](docs/TECH_BOOK_v1.md) — materials / tech graph
 - [docs/GOING_CONCERN.md](docs/GOING_CONCERN.md) — continuous world loop
+- [docs/SYSTEM_MODEL.md](docs/SYSTEM_MODEL.md) — Kepler / Roche / Hill packing
 
-## Not done yet
+## Not done yet (milestones B / C / later)
 
-Multiplayer corps, Director AI, full surface industry depth, managed hosting.
+Multiplayer corps + claims, Director AI, pre-transit loadout customize, ship combat, full surface industry depth, managed hosting.

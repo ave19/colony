@@ -16,9 +16,13 @@
 ## Agency
 
 - Map dominates (3D orbit/zoom/focus; moons visible when focused).
+- Hierarchical **Bodies** list (planets → moons, expand belt).
 - Apply unit capabilities to selected bodies / mine sites.
 - Survey is continuous on-station: detail grows until **mine sites** appear; mining targets sites only.
+- Ark scan goals run system-wide (habitable / Fe / ice / belt / CH₄).
+- Hauls use physics transfer options (Economy / Expedited / Sprint): propellant vs months.
+- Ark trickle-fabs basic steel / chips / panels / chem_prop slowly from seed atoms.
 
 ## Loop
 
-Open archive → commit → transit → arrive materials-only → build → order → survey → sites → industry.
+Open archive → commit → transit → arrive materials-only → build → order → survey → sites → mine → haul → project contracts → industry.
