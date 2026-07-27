@@ -7,6 +7,8 @@ let selectedBodyId = null;
 let selectedDossierSeed = null;
 let expandedPlanets = new Set(); // body ids with moons shown
 let map = null;
+/** Cascade command window: null | { kind: 'ark', tab: string } */
+let cascade = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -140,9 +142,8 @@ function render() {
   renderDossierDetail();
   renderEventSchedule();
   renderFleet();
-  renderArkBay();
-  renderArkScanGoals();
   renderUnitPanel();
+  renderCascade();
   renderBodyTree();
   renderBodyPanel();
   renderOrders();
@@ -153,6 +154,17 @@ function render() {
   renderContracts();
   renderStock();
   renderEvents();
+}
+
+function openArkCascade(tab) {
+  selectedUnitId = "ark";
+  cascade = { kind: "ark", tab: tab || (cascade && cascade.kind === "ark" && cascade.tab) || "survey" };
+  renderSafe();
+}
+
+function closeCascade() {
+  cascade = null;
+  renderSafe();
 }
 
 function selectBody(id, { focus = true, openRight = true } = {}) {
@@ -258,44 +270,6 @@ function renderBodyTree() {
   });
 }
 
-function renderArkScanGoals() {
-  const el = $("ark-scan-goals");
-  if (!el || state.phase !== "system") return;
-  if (!isArkSelected()) {
-    el.innerHTML = "";
-    return;
-  }
-  const specs = state.ark_scan_goal_specs || {};
-  const active = new Set(state.ark_scan_goals || []);
-  el.innerHTML = Object.values(specs)
-    .map((s) => {
-      const on = active.has(s.id);
-      return `<label class="goal-toggle ${on ? "active" : ""}">
-        <input type="checkbox" data-goal="${s.id}" ${on ? "checked" : ""} />
-        <span>
-          <div class="g-title">${s.label}</div>
-          <div class="g-desc">${s.description || ""}</div>
-        </span>
-      </label>`;
-    })
-    .join("");
-  el.querySelectorAll("[data-goal]").forEach((inp) => {
-    inp.onchange = async () => {
-      try {
-        state = await api("/api/ark_scan_goal", {
-          method: "POST",
-          body: JSON.stringify({ goal_id: inp.dataset.goal, enabled: inp.checked }),
-        });
-        selectedUnitId = "ark";
-        render();
-      } catch (e) {
-        alert(String(e.message || e).slice(0, 280));
-        inp.checked = !inp.checked;
-      }
-    };
-  });
-}
-
 function renderEventSchedule() {
   const el = $("event-schedule");
   if (!el || state.phase === "menu") {
@@ -325,31 +299,113 @@ function renderEventSchedule() {
     .join("");
 }
 
-function isArkSelected() {
-  const u = unitById(selectedUnitId);
-  return u && u.kind === "ark";
-}
+/** Large command window cascade (ark console, later other hubs). */
+function renderCascade() {
+  const root = $("cascade");
+  if (!root) return;
 
-/** Ark fabrication bay: queue + authorize — only when Colony Ark is selected. */
-function renderArkBay() {
-  const bay = $("ark-bay");
-  const el = $("build-units");
-  const qel = $("build-queue");
-  if (!bay || !el || !qel || state.phase !== "system") return;
-
-  if (!isArkSelected()) {
-    bay.hidden = true;
+  if (state.phase !== "system" || !cascade) {
+    root.hidden = true;
     return;
   }
-  bay.hidden = false;
 
-  // Queue first — this is the "it's happening" surface
+  if (cascade.kind === "ark") {
+    if (!unitById("ark") && !(state.fleet || []).some((u) => u.kind === "ark")) {
+      cascade = null;
+      root.hidden = true;
+      return;
+    }
+    renderArkCascade(root);
+    return;
+  }
+
+  cascade = null;
+  root.hidden = true;
+}
+
+function renderArkCascade(root) {
+  root.hidden = false;
+  const tab = cascade.tab || "survey";
+  cascade.tab = tab;
+
+  $("cascade-kicker").textContent = "Colony ship · command console";
+  $("cascade-title").textContent = "Colony Ark";
+  const home = bodyById(state.home_body_id);
+  const pop = (state.population || 0).toLocaleString();
+  $("cascade-sub").textContent = home
+    ? `Parked at ${home.name} · ${pop} souls · seed industry online`
+    : `${pop} souls · seed industry online`;
+
+  const tabs = [
+    { id: "survey", label: "Survey priorities" },
+    { id: "fab", label: "Fabrication" },
+    { id: "cargo", label: "Cargo" },
+    { id: "status", label: "Status" },
+  ];
+  $("cascade-tabs").innerHTML = tabs
+    .map(
+      (t) =>
+        `<button type="button" class="cascade-tab ${t.id === tab ? "active" : ""}" data-tab="${t.id}">${t.label}</button>`
+    )
+    .join("");
+  $("cascade-tabs").querySelectorAll("[data-tab]").forEach((btn) => {
+    btn.onclick = () => {
+      cascade = { kind: "ark", tab: btn.dataset.tab };
+      renderCascade();
+    };
+  });
+
+  const body = $("cascade-body");
+  if (tab === "survey") body.innerHTML = arkCascadeSurveyHtml();
+  else if (tab === "fab") body.innerHTML = arkCascadeFabHtml();
+  else if (tab === "cargo") body.innerHTML = arkCascadeCargoHtml();
+  else body.innerHTML = arkCascadeStatusHtml();
+
+  bindArkCascade(body, tab);
+}
+
+function arkCascadeSurveyHtml() {
+  const specs = state.ark_scan_goal_specs || {};
+  const active = new Set(state.ark_scan_goals || []);
+  const n = active.size;
+  const goals = Object.values(specs)
+    .map((s) => {
+      const on = active.has(s.id);
+      return `<label class="goal-toggle ${on ? "active" : ""}">
+        <input type="checkbox" data-goal="${s.id}" ${on ? "checked" : ""} />
+        <span>
+          <div class="g-title">${s.label}</div>
+          <div class="g-desc">${s.description || ""}</div>
+        </span>
+      </label>`;
+    })
+    .join("");
+  const intel = Object.entries(state.hab_intel || {})
+    .filter(([, v]) => v > 0)
+    .map(([id, v]) => {
+      const b = bodyById(id);
+      return `<div class="meta">· ${b ? b.name : id} — hab intel ${v}/3</div>`;
+    })
+    .join("");
+  return `
+    <p class="cascade-section-lead">
+      Set what the ark keeps hunting for across the system. Remote sensing is slower than a probe on-station,
+      but it runs continuously and appears on the event schedule. ${n ? `<strong>${n} active.</strong>` : "None active yet."}
+    </p>
+    <div class="priority-grid">${goals || '<p class="empty">No scan goals defined.</p>'}</div>
+    <h2 style="margin-top:18px">Habitability intel so far</h2>
+    ${intel || '<p class="muted">Enable “Find possible habitable bodies” to build this list.</p>'}
+  `;
+}
+
+function arkCascadeFabHtml() {
   const builds = state.builds || [];
+  let queueHtml;
   if (!builds.length) {
-    qel.innerHTML =
+    queueHtml =
       '<div class="queue-empty">Fabrication bay idle. Authorize a construction job below.</div>';
   } else {
-    qel.innerHTML = builds
+    queueHtml = builds
       .map((j) => {
         const total = j.months_total || 1;
         const left = Math.max(0, j.months_left || 0);
@@ -362,9 +418,8 @@ function renderArkBay() {
       })
       .join("");
   }
-
   const specs = state.unit_builds || {};
-  el.innerHTML = Object.values(specs)
+  const cards = Object.values(specs)
     .map((s) => {
       const cost = Object.entries(s.cost || {})
         .map(([k, v]) => `${v} t ${k}`)
@@ -377,22 +432,110 @@ function renderArkBay() {
       </div>`;
     })
     .join("");
-  el.querySelectorAll("[data-build]").forEach((btn) => {
-    btn.onclick = async () => {
-      try {
-        // Keep ark selected so the queue stays visible
-        selectedUnitId = "ark";
-        state = await api("/api/build", {
-          method: "POST",
-          body: JSON.stringify({ unit_kind: btn.dataset.build }),
-        });
-        $("panel-left").classList.remove("collapsed");
-        render();
-      } catch (e) {
-        alert(String(e.message || e).slice(0, 280));
-      }
-    };
-  });
+  return `
+    <p class="cascade-section-lead">
+      Materials-only arrival: you authorize builds; the bay spends stock and time. Units appear in the fleet when complete.
+    </p>
+    <h2>Bay queue</h2>
+    <div class="queue-list">${queueHtml}</div>
+    <h2>Authorize construction</h2>
+    <div class="cascade-grid">${cards}</div>
+  `;
+}
+
+function arkCascadeCargoHtml() {
+  const s = state.ark_stock || {};
+  const chips = Object.keys(s)
+    .sort()
+    .map(
+      (k) =>
+        `<div class="chip"><span class="k">${k}</span><span class="v">${Number(s[k]).toFixed(1)} t</span></div>`
+    )
+    .join("");
+  return `
+    <p class="cascade-section-lead">
+      Seed stock and anything hauled back to the ark. Propellant (chem_prop) is burned on cargo transfers.
+      The ark also trickle-fabs steel, chips, panels, and prop from atoms when inputs allow.
+    </p>
+    <div class="cascade-stock">${chips || '<p class="empty">Empty holds</p>'}</div>
+    <p class="muted" style="margin-top:14px">
+      For interplanetary moves, select a hauler (or the ark) and use <strong>Cargo transfer</strong> on the right panel.
+    </p>
+  `;
+}
+
+function arkCascadeStatusHtml() {
+  const fleet = state.fleet || [];
+  const byKind = {};
+  for (const u of fleet) byKind[u.kind] = (byKind[u.kind] || 0) + 1;
+  const goals = (state.ark_scan_goals || [])
+    .map((g) => (state.ark_scan_goal_specs || {})[g]?.label || g)
+    .join(" · ");
+  const builds = (state.builds || []).length;
+  const hauls = (state.hauls || []).length;
+  const home = bodyById(state.home_body_id);
+  return `
+    <div class="cascade-split">
+      <div class="card">
+        <h3>Ship</h3>
+        <p><strong>Population</strong> ${(state.population || 0).toLocaleString()}</p>
+        <p><strong>Orbit</strong> ${home ? home.name : "—"}</p>
+        <p><strong>Sim time</strong> ${(state.sim_years || 0).toFixed(2)} y in-system</p>
+        <p class="muted">Xe spent on capture — ion tanks dry.</p>
+      </div>
+      <div class="card">
+        <h3>Operations</h3>
+        <p><strong>Fleet</strong> ${Object.entries(byKind)
+          .map(([k, n]) => `${n} ${k}`)
+          .join(", ") || "ark only"}</p>
+        <p><strong>Fab jobs</strong> ${builds} in bay</p>
+        <p><strong>Hauls in flight</strong> ${hauls}</p>
+        <p><strong>Scan goals</strong> ${goals || "none set"}</p>
+      </div>
+    </div>
+    <p class="cascade-section-lead" style="margin-top:14px">
+      Apply unit capabilities on the map: select a survey sat or miner, click a body, give an order.
+      The ark is the command node — priorities and fabrication live here.
+    </p>
+  `;
+}
+
+function bindArkCascade(body, tab) {
+  if (tab === "survey") {
+    body.querySelectorAll("[data-goal]").forEach((inp) => {
+      inp.onchange = async () => {
+        try {
+          state = await api("/api/ark_scan_goal", {
+            method: "POST",
+            body: JSON.stringify({ goal_id: inp.dataset.goal, enabled: inp.checked }),
+          });
+          selectedUnitId = "ark";
+          cascade = { kind: "ark", tab: "survey" };
+          render();
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 280));
+          inp.checked = !inp.checked;
+        }
+      };
+    });
+  }
+  if (tab === "fab") {
+    body.querySelectorAll("[data-build]").forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          selectedUnitId = "ark";
+          state = await api("/api/build", {
+            method: "POST",
+            body: JSON.stringify({ unit_kind: btn.dataset.build }),
+          });
+          cascade = { kind: "ark", tab: "fab" };
+          render();
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 280));
+        }
+      };
+    });
+  }
 }
 
 function renderCatalog() {
@@ -485,11 +628,16 @@ function renderFleet() {
   el.innerHTML = fleet
     .map((u) => {
       const loc = bodyById(u.location_id);
+      const isArk = u.kind === "ark";
       const busy =
         u.status !== "idle"
           ? `<div class="meta busy">${u.status} ${u.order || ""} ${u.months_left ? u.months_left + " mo" : ""}</div>`
-          : `<div class="meta">@ ${loc ? loc.name : u.location_id}</div>`;
-      return `<button type="button" class="fleet-item ${selectedUnitId === u.id ? "selected" : ""}" data-unit="${u.id}">
+          : `<div class="meta">@ ${loc ? loc.name : u.location_id}${
+              isArk ? " · click to open console" : ""
+            }</div>`;
+      return `<button type="button" class="fleet-item ${isArk ? "ark-item" : ""} ${
+        selectedUnitId === u.id ? "selected" : ""
+      }" data-unit="${u.id}">
         <div class="name">${u.name}</div>
         <div class="meta">${u.kind}</div>${busy}
       </button>`;
@@ -497,12 +645,20 @@ function renderFleet() {
     .join("") || '<p class="empty">No fleet</p>';
   el.querySelectorAll("[data-unit]").forEach((btn) => {
     btn.onclick = () => {
-      selectedUnitId = btn.dataset.unit;
+      const id = btn.dataset.unit;
+      const u = unitById(id);
+      selectedUnitId = id;
       $("panel-left").classList.remove("collapsed");
-      render();
+      if (u && u.kind === "ark") {
+        openArkCascade();
+      } else {
+        // Close ark console when focusing a field unit
+        if (cascade && cascade.kind === "ark") cascade = null;
+        render();
+      }
     };
   });
-  // Default to ark on arrival so fabrication bay is discoverable
+  // Soft default select ark (does not auto-open console — click opens cascade)
   if (!selectedUnitId && fleet.some((u) => u.kind === "ark")) {
     selectedUnitId = "ark";
   }
@@ -512,14 +668,25 @@ function renderUnitPanel() {
   const el = $("unit-panel");
   if (!el || state.phase !== "system") return;
   const u = unitById(selectedUnitId);
-  // Ark uses fabrication bay instead of this generic card
-  if (!u || u.kind === "ark") {
-    el.hidden = !!u && u.kind === "ark";
-    if (!u) {
-      el.hidden = false;
-      el.className = "empty";
-      el.textContent = "Select a unit from the fleet list";
-    }
+  if (!u) {
+    el.hidden = false;
+    el.className = "empty";
+    el.textContent = "Select a unit from the fleet list";
+    return;
+  }
+  if (u.kind === "ark") {
+    el.hidden = false;
+    el.className = "card";
+    const goals = (state.ark_scan_goals || []).length;
+    const jobs = (state.builds || []).length;
+    el.innerHTML = `<h3>${u.name}</h3>
+      <p class="muted">Command node · survey priorities, fab bay, cargo</p>
+      <p>${goals} scan goal${goals === 1 ? "" : "s"} · ${jobs} fab job${jobs === 1 ? "" : "s"}</p>
+      <button type="button" class="primary open-cascade-btn" id="btn-open-ark">
+        Open ark command console
+      </button>`;
+    const b = $("btn-open-ark");
+    if (b) b.onclick = () => openArkCascade();
     return;
   }
   el.hidden = false;
@@ -1068,6 +1235,18 @@ $("toggle-right").onclick = () => $("panel-right").classList.toggle("collapsed")
 // Start with left panel open so "View survey results" is obvious
 $("panel-left").classList.remove("collapsed");
 
+// Cascade close
+const cascadeClose = $("cascade-close");
+if (cascadeClose) cascadeClose.onclick = () => closeCascade();
+const cascadeBackdrop = $("cascade-backdrop");
+if (cascadeBackdrop) cascadeBackdrop.onclick = () => closeCascade();
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && cascade) {
+    ev.preventDefault();
+    closeCascade();
+  }
+});
+
 $("btn-catalog").onclick = async () => {
   state = await api("/api/catalog", { method: "POST", body: "{}" });
   $("panel-left").classList.remove("collapsed");
@@ -1141,6 +1320,7 @@ $("btn-reset").onclick = async () => {
   state = await api("/api/reset", { method: "POST", body: "{}" });
   selectedUnitId = null;
   selectedBodyId = null;
+  cascade = null;
   map.clearSystem();
   render();
 };

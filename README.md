@@ -10,7 +10,7 @@ You lead a colony ship into a system that already has remote survey data on file
 2. **Commit** to a dossier → multi-year transit.
 3. **Arrive materials-only** — people, know-how, seed stock. **No** pre-built survey sats / miners / haulers.
 4. **Authorize builds** on the ark (survey sat, miner, hauler) — materials + time.
-5. **Ark scan goals** (when ark selected) — continuous system search for habitables, Fe, ice, belt, CH₄.
+5. **Click the Colony Ark** — opens the **command console** cascade (survey priorities, fabrication, cargo, status).
 6. **Order units** — select unit + body: scan moon / find sources of X / extract at a mine site.
 7. **Found a project** → contracts (needs). Bootstrap with ark cargo, or **haul** with transfer options.
 8. **Cargo transfers** — Economy (Hohmann) / Expedited / Sprint: propellant vs months + real Δv.

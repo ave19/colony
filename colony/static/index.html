@@ -61,26 +61,31 @@
           <h2>Active hauls</h2>
           <div id="hauls-list" class="queue-list"></div>
           <h2>Fleet</h2>
-          <p class="muted">Select a unit. Select the <strong>Colony Ark</strong> to manage fabrication.</p>
+          <p class="muted">Click a unit. The <strong>Colony Ark</strong> opens its command console.</p>
           <div id="fleet-list"></div>
-
-          <!-- Only when ark is selected: fabrication bay + authorize builds -->
-          <div id="ark-bay" hidden>
-            <h2>Ark scan goals</h2>
-            <p class="muted">The ark keeps scanning the system for what you assign.</p>
-            <div id="ark-scan-goals"></div>
-            <h2>Ark fabrication bay</h2>
-            <div id="build-queue" class="queue-list"></div>
-            <h2>Authorize construction</h2>
-            <p class="muted">Spend seed materials. Jobs appear in the bay queue above.</p>
-            <div id="build-units"></div>
-          </div>
 
           <!-- Other units: status only (orders stay with map selection on the right) -->
           <div id="unit-panel" class="empty">Select a unit</div>
         </div>
       </div>
     </aside>
+
+    <!-- UI cascade: larger command windows (ark, later other hubs) -->
+    <div id="cascade" class="cascade" hidden>
+      <div class="cascade-backdrop" id="cascade-backdrop"></div>
+      <div class="cascade-window" role="dialog" aria-modal="true" aria-labelledby="cascade-title">
+        <header class="cascade-header">
+          <div class="cascade-title-block">
+            <p class="cascade-kicker" id="cascade-kicker">Command</p>
+            <h1 id="cascade-title">—</h1>
+            <p class="cascade-sub" id="cascade-sub"></p>
+          </div>
+          <button type="button" class="cascade-close" id="cascade-close" title="Close">✕</button>
+        </header>
+        <nav class="cascade-tabs" id="cascade-tabs"></nav>
+        <div class="cascade-body" id="cascade-body"></div>
+      </div>
+    </div>
 
     <aside id="panel-right" class="float-panel right collapsed">
       <button type="button" class="panel-toggle" id="toggle-right" title="Toggle panel">☰</button>
