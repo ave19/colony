@@ -610,6 +610,63 @@ details.drawer summary {
   max-height: min(82vh, 760px);
 }
 
+/* Habitability checklist */
+.tf-verdict {
+  padding: 10px 12px;
+  border-radius: 8px;
+  margin: 8px 0 12px;
+  font-weight: 600;
+  font-size: 0.92rem;
+  line-height: 1.4;
+  border: 1px solid var(--line);
+  background: rgba(15, 24, 36, 0.95);
+}
+.tf-verdict.tf-ok { border-color: rgba(62, 207, 142, 0.5); color: var(--good); }
+.tf-verdict.tf-hard { border-color: rgba(232, 162, 58, 0.5); color: #e8a23a; }
+.tf-verdict.tf-build { border-color: rgba(74, 163, 240, 0.55); color: var(--accent); }
+.tf-verdict.tf-no { border-color: rgba(224, 96, 80, 0.5); color: #e06050; }
+.tf-verdict.tf-unknown { color: var(--text); }
+.tf-factors { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.tf-factor {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(12, 18, 28, 0.9);
+}
+.tf-badge {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: #1a2533;
+  color: var(--muted);
+  min-width: 3.2em;
+  text-align: center;
+}
+.tf-ok .tf-badge { background: rgba(62, 207, 142, 0.2); color: var(--good); }
+.tf-hard .tf-badge { background: rgba(232, 162, 58, 0.2); color: #e8a23a; }
+.tf-build .tf-badge { background: rgba(74, 163, 240, 0.2); color: var(--accent); }
+.tf-no .tf-badge { background: rgba(224, 96, 80, 0.2); color: #e06050; }
+.tf-unknown .tf-badge { background: #243040; color: #9ab; }
+.tf-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tf-body strong { font-size: 0.88rem; }
+.tf-value { font-size: 0.8rem; color: var(--text); }
+.tf-fix { font-size: 0.75rem; color: var(--muted); line-height: 1.35; }
+.tf-path {
+  margin: 6px 0 0;
+  padding-left: 1.2em;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.tf-path li { margin-bottom: 4px; }
+
 @media (max-width: 700px) {
   .float-panel { width: min(300px, calc(100vw - 20px)); }
   .hud-hint { font-size: 0.65rem; max-width: 90vw; white-space: normal; text-align: center; }

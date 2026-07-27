@@ -186,7 +186,8 @@ function openBodyCascade(bodyId, tab) {
   cascade = {
     kind: "body",
     bodyId,
-    tab: tab || keepTab || "overview",
+    tab: tab || keepTab || "habitability",
+    _opened: !!(cascade && cascade.kind === "body" && cascade.bodyId === bodyId),
   };
   if (map) map.setSelected(bodyId);
   renderSafe();
@@ -478,7 +479,13 @@ function renderBodyCascade(root, b) {
   if (b.surface_g != null) bits.push(`${b.surface_g} g`);
   $("cascade-sub").textContent = bits.join(" · ") || b.density_hint || "";
 
+  // Default first open to habitability — that's what players ask first
+  if (!cascade._opened) {
+    cascade.tab = cascade.tab || "habitability";
+    cascade._opened = true;
+  }
   const tabs = [
+    { id: "habitability", label: "Habitability" },
     { id: "overview", label: "Overview" },
     { id: "intel", label: "Intel" },
     { id: "tasks", label: "Tasks" },
@@ -498,12 +505,40 @@ function renderBodyCascade(root, b) {
   });
 
   const bodyEl = $("cascade-body");
-  if (tab === "intel") bodyEl.innerHTML = bodyCascadeIntelHtml(b);
+  if (tab === "habitability") bodyEl.innerHTML = bodyCascadeHabitabilityHtml(b);
+  else if (tab === "intel") bodyEl.innerHTML = bodyCascadeIntelHtml(b);
   else if (tab === "tasks") bodyEl.innerHTML = bodyCascadeTasksHtml(b);
   else if (tab === "site") bodyEl.innerHTML = bodyCascadeSiteHtml(b);
   else bodyEl.innerHTML = bodyCascadeOverviewHtml(b);
 
   bindBodyCascade(bodyEl, b, tab);
+}
+
+function bodyCascadeHabitabilityHtml(b) {
+  const d =
+    b.terraform_dossier ||
+    (state.terraform_dossiers && state.terraform_dossiers[b.id]) ||
+    null;
+  if (!d) {
+    return `<p class="cascade-section-lead">No habitability data for this object.</p>`;
+  }
+  return `
+    <p class="cascade-section-lead">
+      Can people live here open-air? Gravity and star distance are known from physics.
+      Air, water, and magnetic field need surveying. Missing field ⇒ build an L1 shield.
+    </p>
+    ${terraformDossierHtml(d)}
+    <div class="action-stack" style="margin-top:12px">
+      <button type="button" class="action-card primary-action" id="bc-start-tf-scan">
+        <span class="action-title">Start ark terraform scan</span>
+        <span class="action-desc">Enables system-wide habitability search (warp for progress).</span>
+      </button>
+      <button type="button" class="action-card" data-goto-tab="tasks">
+        <span class="action-title">Send a survey probe here</span>
+        <span class="action-desc">On-station survey fills the dossier faster than remote ark sensing.</span>
+      </button>
+    </div>
+  `;
 }
 
 function bodyCascadeOverviewHtml(b) {
@@ -519,10 +554,15 @@ function bodyCascadeOverviewHtml(b) {
   }
   const bld = (b.site_buildings || []).filter((x) => x && x !== "ark");
   const powerMw = b.site_power_mw || 0;
+  const d =
+    b.terraform_dossier ||
+    (state.terraform_dossiers && state.terraform_dossiers[b.id]);
   return `
     <p class="cascade-section-lead">
       ${b.kind}${b.planet_class ? " / " + b.planet_class : ""} · ${b.density_hint || "—"}
     </p>
+    ${d ? terraformDossierHtml(d, { compact: true }) : ""}
+    <p class="muted" style="margin:8px 0"><button type="button" class="order" data-goto-tab="habitability">Open full habitability checklist →</button></p>
     <div class="cascade-split">
       <div class="card">
         <h3>Orbit &amp; gravity</h3>
@@ -547,11 +587,6 @@ function bodyCascadeOverviewHtml(b) {
         }</p>
       </div>
     </div>
-    ${
-      b.terraform_dossier && b.terraform_dossier.level
-        ? `<h2>Terraform</h2>${terraformDossierHtml(b.terraform_dossier)}`
-        : `<p class="muted">No terraform dossier yet — ark scan goal or probe survey.</p>`
-    }
   `;
 }
 
@@ -834,6 +869,29 @@ async function fillBodyCascadeTasks(b) {
 }
 
 function bindBodyCascade(bodyEl, b, tab) {
+  bodyEl.querySelectorAll("[data-goto-tab]").forEach((btn) => {
+    btn.onclick = () => {
+      cascade = { kind: "body", bodyId: b.id, tab: btn.dataset.gotoTab, _opened: true };
+      renderCascade();
+    };
+  });
+  const tfScan = bodyEl.querySelector("#bc-start-tf-scan");
+  if (tfScan) {
+    tfScan.onclick = async () => {
+      try {
+        state = await api("/api/ark_scan_goal", {
+          method: "POST",
+          body: JSON.stringify({ goal_id: "habitable", enabled: true }),
+        });
+        $("toast").textContent =
+          "Ark terraform scan enabled — Warp → event for progressive intel.";
+        cascade = { kind: "body", bodyId: b.id, tab: "habitability", _opened: true };
+        render();
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 280));
+      }
+    };
+  }
   if (tab === "overview") {
     const fb = bodyEl.querySelector("#bc-focus");
     if (fb) fb.onclick = () => map && map.focusBody(b.id);
@@ -1341,53 +1399,71 @@ function renderArkCascade(root) {
   bindArkCascade(body, tab);
 }
 
-function terraformDossierHtml(d) {
-  if (!d || !d.level) return "";
-  const rows = [];
-  rows.push(`<div class="meta">Survey depth ${d.level}/${d.level_max}</div>`);
-  if (d.level >= 1) {
-    rows.push(
-      `<div>· <strong>Insolation</strong> ${d.insolation_note || ""}${
-        d.semi_major_au != null ? ` · ${d.semi_major_au} AU` : ""
-      }</div>`
-    );
+function factorStatusClass(st) {
+  if (st === "ok") return "tf-ok";
+  if (st === "need_build") return "tf-build";
+  if (st === "hard") return "tf-hard";
+  if (st === "no") return "tf-no";
+  return "tf-unknown";
+}
+
+function factorStatusLabel(st) {
+  return (
+    {
+      ok: "OK",
+      hard: "Hard",
+      need_build: "Build",
+      no: "No",
+      unknown: "?",
+    }[st] || st
+  );
+}
+
+function terraformDossierHtml(d, { compact = false } = {}) {
+  if (!d) return "";
+  const vs = d.verdict_status || "unknown";
+  const factors = d.factors || [];
+  const factorRows = factors
+    .map((f) => {
+      const cls = factorStatusClass(f.status);
+      return `<div class="tf-factor ${cls}">
+        <span class="tf-badge">${factorStatusLabel(f.status)}</span>
+        <span class="tf-body">
+          <strong>${f.label}</strong>
+          <span class="tf-value">${f.known ? f.value : "not surveyed yet"}</span>
+          <span class="tf-fix">${f.fix || ""}</span>
+        </span>
+      </div>`;
+    })
+    .join("");
+  const path = (d.path || [])
+    .map((p) => `<li>${p}</li>`)
+    .join("");
+  const score =
+    d.terraform_score != null
+      ? `<div class="meta">Terraform score <strong>${d.terraform_score}/10</strong> · survey ${d.level}/${d.level_max}</div>`
+      : `<div class="meta">Survey depth ${d.level || 0}/${d.level_max || 5} — complete to unlock full score</div>`;
+
+  if (compact) {
+    return `<div class="tf-verdict ${factorStatusClass(vs)}">${d.verdict || "—"}</div>`;
   }
-  if (d.level >= 2) {
-    rows.push(
-      `<div>· <strong>Surface g</strong> ${d.surface_g} g (${d.g_class || "—"})</div>`
-    );
-  }
-  if (d.level >= 3) {
-    rows.push(
-      `<div>· <strong>Atmosphere</strong> ${d.atmosphere_class || "—"}${
-        d.atmosphere_note ? " — " + d.atmosphere_note : ""
-      }</div>`
-    );
-  }
-  if (d.level >= 4) {
-    rows.push(
-      `<div>· <strong>Water</strong> ${(d.water_class || "none").replace(/_/g, " ")}</div>`
-    );
-  }
-  if (d.level >= 5) {
-    rows.push(
-      `<div>· <strong>Core</strong> ${d.has_active_core ? "active" : "cold/dead"} · <strong>Magnetosphere</strong> ${
-        d.has_magnetosphere ? "yes" : "none"
-      }</div>`
-    );
-    rows.push(`<div class="meta">${d.shield_note || ""}</div>`);
-    if (d.needs_l1_magnetic_shield) {
-      rows.push(
-        d.l1_shield_online
-          ? `<div style="color:var(--good)">L1 magnetic shield online</div>`
-          : `<div style="color:#e8a23a">Need L1 magnetic shield (ark fab → deploy on this body)</div>`
-      );
+
+  return `<div class="card tf-card" style="margin-bottom:8px">
+    <h3>Habitability · ${d.name || d.body_id}</h3>
+    <div class="tf-verdict ${factorStatusClass(vs)}">${d.verdict || "—"}</div>
+    ${score}
+    <div class="tf-factors">${factorRows}</div>
+    ${
+      path
+        ? `<h2 style="margin-top:12px">What it would take</h2><ul class="tf-path">${path}</ul>`
+        : ""
     }
-    rows.push(`<div>· <strong>Terraform score</strong> ${d.terraform_score}/10</div>`);
-  } else {
-    rows.push(`<div class="meta">… deeper scan for water, core, magnetic field</div>`);
-  }
-  return `<div class="card" style="margin-bottom:8px"><h3>${d.name || d.body_id}</h3>${rows.join("")}</div>`;
+    ${
+      d.level < 5
+        ? `<p class="muted" style="margin-top:10px">${d.how_to_survey || ""}</p>`
+        : ""
+    }
+  </div>`;
 }
 
 function arkCascadeSurveyHtml() {

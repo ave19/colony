@@ -528,16 +528,22 @@ class Game:
         return min(10, score)
 
     def terraform_dossier(self, body_id: str) -> dict:
-        """Fog-of-war terraform report for UI (only revealed fields)."""
+        """
+        Habitability / terraform report for UI.
+
+        Physics we always know (mass → g, orbit → insolation) is never fogged.
+        Atmosphere, water, core, and magnetosphere need progressive survey (levels 3–5).
+        Always includes a path checklist: what is ok / bad / unknown / build-required.
+        """
         from .system_gen import _habitable_zone
         from .constants import AU_M
         from .orbits import surface_gravity
 
         if not self.system:
-            return {"body_id": body_id, "level": 0}
+            return {"body_id": body_id, "level": 0, "factors": [], "path": []}
         body = self.system.body_by_id(body_id)
         if not body:
-            return {"body_id": body_id, "level": 0}
+            return {"body_id": body_id, "level": 0, "factors": [], "path": []}
         level = self.hab_intel.get(body_id, 0)
         lum = float(self.system.star.get("lum") or 1.0)
         hz_in, hz_out = _habitable_zone(lum)
@@ -548,27 +554,39 @@ class Game:
             a_au = body.semi_major_m / AU_M if body.kind != "moon" else None
         in_hz = bool(a_au is not None and hz_in <= a_au <= hz_out)
         g_e = surface_gravity(body.mass_kg, body.radius_m) / 9.81
+        if g_e < 0.35:
+            g_class = "low"
+        elif g_e <= 1.2:
+            g_class = "comfortable"
+        else:
+            g_class = "high"
+
+        surface_ok = body.planet_class in ("rocky", "moon") or body.kind == "moon"
+        is_giant = body.planet_class in ("gas_giant", "ice_giant")
+        is_rock = body.kind == "asteroid"
 
         d: Dict[str, Any] = {
             "body_id": body_id,
             "name": body.name,
+            "kind": body.kind,
+            "planet_class": body.planet_class,
             "level": level,
             "level_max": 5,
+            "survey_complete": level >= 5,
+            # Always-known physics
+            "semi_major_au": round(a_au, 3) if a_au is not None else None,
+            "in_hz": in_hz,
+            "insolation_note": (
+                "in optimistic habitable zone"
+                if in_hz
+                else "outside temperate insolation band"
+            ),
+            "surface_g": round(g_e, 3),
+            "g_class": g_class,
+            "surface_settlement_possible": surface_ok and not is_giant,
         }
-        if level >= 1:
-            d["semi_major_au"] = round(a_au, 3) if a_au is not None else None
-            d["in_hz"] = in_hz
-            d["insolation_note"] = (
-                "in optimistic habitable zone" if in_hz else "outside temperate insolation band"
-            )
-        if level >= 2:
-            d["surface_g"] = round(g_e, 3)
-            if g_e < 0.35:
-                d["g_class"] = "low"
-            elif g_e <= 1.2:
-                d["g_class"] = "comfortable"
-            else:
-                d["g_class"] = "high"
+
+        # Survey-revealed (only when earned)
         if level >= 3:
             d["atmosphere_class"] = body.atmosphere_class
             d["atmosphere_note"] = body.atmosphere_note
@@ -578,20 +596,321 @@ class Game:
         if level >= 5:
             d["has_active_core"] = body.has_active_core
             d["has_magnetosphere"] = body.has_magnetosphere
-            d["needs_l1_magnetic_shield"] = not body.has_magnetosphere and body.planet_class in (
-                "rocky",
-                "moon",
+            d["needs_l1_magnetic_shield"] = (
+                not body.has_magnetosphere and surface_ok and not is_rock
             )
             d["terraform_score"] = self._terraform_score(body, in_hz, g_e)
+            d["l1_shield_online"] = self._has_building(body_id, "l1_magnetic_shield")
             if d["needs_l1_magnetic_shield"]:
                 d["shield_note"] = (
-                    "No native magnetosphere — deploy a magnetic shield station "
-                    "at the sunward Lagrange point (L1) before open-air terraforming."
+                    "No native magnetosphere — build an L1 magnetic shield "
+                    "(ark fab → deploy on this body) before open-air settlement."
                 )
             else:
                 d["shield_note"] = "Native magnetosphere provides radiation shielding."
-            # Is shield already built for this body?
-            d["l1_shield_online"] = self._has_building(body_id, "l1_magnetic_shield")
+
+        # --- Factor checklist (always, with known/unknown) ---------------------
+        factors: List[dict] = []
+
+        if is_giant:
+            factors.append(
+                {
+                    "id": "surface",
+                    "label": "Solid surface",
+                    "known": True,
+                    "status": "no",
+                    "value": "gas/ice giant — no surface colony",
+                    "fix": "Cannot terraform as a surface world. Moons may be targets.",
+                }
+            )
+        elif is_rock:
+            factors.append(
+                {
+                    "id": "surface",
+                    "label": "Settlement type",
+                    "known": True,
+                    "status": "hard",
+                    "value": "asteroid — stations / caves, not open-air planet",
+                    "fix": "Habitable only as pressurized habitats, not planetary terraforming.",
+                }
+            )
+        else:
+            factors.append(
+                {
+                    "id": "surface",
+                    "label": "Solid surface",
+                    "known": True,
+                    "status": "ok",
+                    "value": "rocky surface available",
+                    "fix": "Can host surface bases.",
+                }
+            )
+
+        # Gravity — always known
+        if g_class == "comfortable":
+            g_status, g_fix = "ok", "Fine for long-term settlement."
+        elif g_class == "low":
+            g_status, g_fix = (
+                "hard",
+                "Easy launch, hard to hold thick air / bone health — habitats help.",
+            )
+        else:
+            g_status, g_fix = "hard", "High-g ops costly; lift and construction harder."
+        factors.append(
+            {
+                "id": "gravity",
+                "label": "Surface gravity",
+                "known": True,
+                "status": g_status,
+                "value": f"{g_e:.2f} g ({g_class})",
+                "fix": g_fix,
+            }
+        )
+
+        # Insolation — always known for planets/moons with a
+        if a_au is None:
+            factors.append(
+                {
+                    "id": "insolation",
+                    "label": "Starlight / climate band",
+                    "known": False,
+                    "status": "unknown",
+                    "value": "—",
+                    "fix": "Need orbital context.",
+                }
+            )
+        elif in_hz:
+            factors.append(
+                {
+                    "id": "insolation",
+                    "label": "Starlight / climate band",
+                    "known": True,
+                    "status": "ok",
+                    "value": f"~{a_au:.2f} AU · optimistic HZ",
+                    "fix": "Temperate insolation possible with right atmosphere.",
+                }
+            )
+        else:
+            factors.append(
+                {
+                    "id": "insolation",
+                    "label": "Starlight / climate band",
+                    "known": True,
+                    "status": "hard",
+                    "value": f"~{a_au:.2f} AU · outside optimistic HZ",
+                    "fix": "Too hot or cold for open-air Earth-like climate without heavy engineering "
+                    "(domes, heat, or reflective systems).",
+                }
+            )
+
+        # Atmosphere
+        if level < 3:
+            factors.append(
+                {
+                    "id": "atmosphere",
+                    "label": "Atmosphere",
+                    "known": False,
+                    "status": "unknown",
+                    "value": "not surveyed",
+                    "fix": "Send a survey probe or enable ark terraform scan.",
+                }
+            )
+        else:
+            ac = body.atmosphere_class or "none"
+            if ac == "substantial":
+                st, fix = "ok", "Thick air present — still check composition / pressure."
+            elif ac == "thin":
+                st, fix = (
+                    "hard",
+                    "Thin air — import volatiles, pressure habitats, or thicken over centuries.",
+                )
+            elif ac == "giant_envelope":
+                st, fix = "no", "Not a surface atmosphere we can settle."
+            else:
+                st, fix = (
+                    "hard",
+                    "Airless — sealed habitats required; import N₂/O₂ for any open air.",
+                )
+            factors.append(
+                {
+                    "id": "atmosphere",
+                    "label": "Atmosphere",
+                    "known": True,
+                    "status": st,
+                    "value": ac + (f" · {body.atmosphere_note}" if body.atmosphere_note else ""),
+                    "fix": fix,
+                }
+            )
+
+        # Water
+        if level < 4:
+            factors.append(
+                {
+                    "id": "water",
+                    "label": "Water / ice",
+                    "known": False,
+                    "status": "unknown",
+                    "value": "not surveyed",
+                    "fix": "Directed H₂O search or continue terraform survey.",
+                }
+            )
+        else:
+            wc = body.water_class or "none"
+            if wc == "surface_potential":
+                st, fix = "ok", "Water inventory supports life-support / climate work."
+            elif wc in ("subsurface", "ice"):
+                st, fix = (
+                    "hard",
+                    "Ice/subsurface water — mine and melt; not free oceans.",
+                )
+            else:
+                st, fix = "hard", "Dry — import ice from outer system or moons."
+            factors.append(
+                {
+                    "id": "water",
+                    "label": "Water / ice",
+                    "known": True,
+                    "status": st,
+                    "value": wc.replace("_", " "),
+                    "fix": fix,
+                }
+            )
+
+        # Magnetosphere / radiation
+        if level < 5:
+            factors.append(
+                {
+                    "id": "magnetosphere",
+                    "label": "Magnetic field / radiation",
+                    "known": False,
+                    "status": "unknown",
+                    "value": "not surveyed",
+                    "fix": "Need core/dynamo assessment. If no field → L1 magnetic shield.",
+                }
+            )
+        else:
+            if body.has_magnetosphere:
+                factors.append(
+                    {
+                        "id": "magnetosphere",
+                        "label": "Magnetic field / radiation",
+                        "known": True,
+                        "status": "ok",
+                        "value": "native magnetosphere"
+                        + (" · active core" if body.has_active_core else ""),
+                        "fix": "Natural solar-wind protection.",
+                    }
+                )
+            else:
+                shield_on = self._has_building(body_id, "l1_magnetic_shield")
+                factors.append(
+                    {
+                        "id": "magnetosphere",
+                        "label": "Magnetic field / radiation",
+                        "known": True,
+                        "status": "ok" if shield_on else "need_build",
+                        "value": (
+                            "no native field · L1 shield ONLINE"
+                            if shield_on
+                            else "no native field · L1 shield REQUIRED"
+                        ),
+                        "fix": (
+                            "Artificial magnetosphere is active."
+                            if shield_on
+                            else "Build L1 magnetic shield (ark fabrication bay → deploy on this body)."
+                        ),
+                    }
+                )
+            factors.append(
+                {
+                    "id": "core",
+                    "label": "Planetary core",
+                    "known": True,
+                    "status": "ok" if body.has_active_core else "hard",
+                    "value": "active dynamo possible" if body.has_active_core else "cold / dead core",
+                    "fix": (
+                        "May sustain or rebuild a field over geologic time."
+                        if body.has_active_core
+                        else "No natural field recovery — artificial shield is the path."
+                    ),
+                }
+            )
+
+        d["factors"] = factors
+
+        # Path summary
+        path: List[str] = []
+        if is_giant:
+            path.append("Not a terraform surface target. Survey its moons instead.")
+        elif is_rock:
+            path.append("Build pressurized habitats (not open-air terraforming).")
+        else:
+            if level < 5:
+                path.append(
+                    f"Survey incomplete ({level}/5). Enable ark “terraform targets” scan "
+                    "or park a survey sat here and warp."
+                )
+            for f in factors:
+                if f["status"] == "need_build":
+                    path.append(f["fix"])
+                elif f["status"] == "hard" and f["known"]:
+                    path.append(f"{f['label']}: {f['fix']}")
+                elif f["status"] == "no":
+                    path.append(f["fix"])
+            if level >= 5 and all(
+                f["status"] in ("ok", "hard") for f in factors if f["id"] != "surface"
+            ):
+                if any(f["status"] == "need_build" for f in factors):
+                    path.append("After L1 shield: sealed bases → expand life support → optional climate work.")
+                elif not path:
+                    path.append(
+                        "Strong candidate: bases first, then industry, then optional open-air climate work."
+                    )
+
+        # One-line verdict
+        if is_giant:
+            verdict = "Not habitable (no solid surface)."
+            verdict_status = "no"
+        elif is_rock:
+            verdict = "Habitable only as habitats / stations — not a planet to terraform."
+            verdict_status = "hard"
+        elif level < 3:
+            verdict = (
+                f"Unknown habitability — physics: {g_e:.2f} g, "
+                f"{'in' if in_hz else 'outside'} optimistic HZ. Survey for air, water, magnetic field."
+            )
+            verdict_status = "unknown"
+        elif level < 5:
+            verdict = (
+                f"Partial survey ({level}/5). Gravity and climate band known; "
+                "still scanning atmosphere/water/magnetosphere."
+            )
+            verdict_status = "unknown"
+        else:
+            score = d.get("terraform_score", 0)
+            if d.get("needs_l1_magnetic_shield") and not d.get("l1_shield_online"):
+                verdict = (
+                    f"Not open-air ready (score {score}/10). "
+                    "Missing magnetic field — build L1 shield first."
+                )
+                verdict_status = "need_build"
+            elif score >= 7:
+                verdict = f"Strong terraform / settlement candidate (score {score}/10)."
+                verdict_status = "ok"
+            elif score >= 4:
+                verdict = f"Marginal candidate (score {score}/10) — expect heavy engineering."
+                verdict_status = "hard"
+            else:
+                verdict = f"Poor open-air candidate (score {score}/10) — sealed bases only."
+                verdict_status = "hard"
+
+        d["path"] = path
+        d["verdict"] = verdict
+        d["verdict_status"] = verdict_status
+        d["how_to_survey"] = (
+            "Ark console → Survey priorities → “Find terraform / habitability targets”, "
+            "or Tasks tab → survey probe → Scan / broad survey on this body, then Warp."
+        )
         return d
 
     def _ark_seek_asteroids(self, months: float) -> None:
@@ -2327,11 +2646,12 @@ class Game:
             "hab_intel": dict(self.hab_intel),
             "terraform_dossiers": (
                 {
-                    bid: self.terraform_dossier(bid)
-                    for bid, lv in self.hab_intel.items()
-                    if lv > 0
+                    b.id: self.terraform_dossier(b.id)
+                    for b in self.system.bodies
+                    if b.kind in ("planet", "moon")
+                    and b.planet_class in ("rocky", "moon", "gas_giant", "ice_giant")
                 }
-                if self.phase == "system"
+                if self.phase == "system" and self.system
                 else {}
             ),
             "body_tree": self.body_tree() if self.phase == "system" else [],
@@ -2347,9 +2667,15 @@ class Game:
             for b in data["system"].get("bodies", []):
                 lv = self.hab_intel.get(b["id"], 0)
                 b["hab_intel"] = lv
-                if lv > 0:
+                # Always attach habitability checklist (physics + fogged survey fields)
+                if b.get("kind") in ("planet", "moon") or b.get("planet_class") in (
+                    "rocky",
+                    "moon",
+                    "gas_giant",
+                    "ice_giant",
+                ):
                     b["terraform_dossier"] = self.terraform_dossier(b["id"])
-                # Fog of war: hide unsurveyed terraform truth in API body dump
+                # Fog of war: hide unsurveyed terraform truth in raw body dump
                 if lv < 5:
                     b.pop("has_active_core", None)
                     b.pop("has_magnetosphere", None)

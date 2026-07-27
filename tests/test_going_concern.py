@@ -168,6 +168,24 @@ def test_ark_scan_goal_habitable_and_iron():
     )
 
 
+def test_terraform_dossier_always_has_physics_and_checklist():
+    g = Game(universe_seed=8)
+    _arrive(g)
+    rocky = next(b for b in g.system.bodies if b.kind == "planet" and b.planet_class == "rocky")
+    d0 = g.terraform_dossier(rocky.id)
+    assert d0["level"] == 0
+    assert d0["surface_g"] is not None
+    assert "in_hz" in d0
+    assert d0["verdict"]
+    assert d0["verdict_status"] == "unknown"
+    ids = {f["id"] for f in d0["factors"]}
+    assert "gravity" in ids and "insolation" in ids
+    # Atmosphere/water/mag unknown until surveyed
+    atmo = next(f for f in d0["factors"] if f["id"] == "atmosphere")
+    assert atmo["known"] is False
+    assert "how_to_survey" in d0
+
+
 def test_terraform_dossier_reveals_g_atmosphere_water_magnetosphere():
     g = Game(universe_seed=8)
     _arrive(g)
@@ -185,8 +203,12 @@ def test_terraform_dossier_reveals_g_atmosphere_water_magnetosphere():
     assert "has_magnetosphere" in d
     assert "has_active_core" in d
     assert "terraform_score" in d
+    assert d["verdict"]
+    mag = next(f for f in d["factors"] if f["id"] == "magnetosphere")
+    assert mag["known"] is True
     if not d["has_magnetosphere"]:
         assert d["needs_l1_magnetic_shield"] is True
+        assert mag["status"] in ("need_build", "ok")
         assert "L1" in d["shield_note"] or "Lagrange" in d["shield_note"]
 
 
