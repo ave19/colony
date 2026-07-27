@@ -27,12 +27,25 @@ from .orbits import (
 
 SECONDS_PER_YEAR = 365.25 * 86400.0
 
-# Star archetypes: mass (Msun), luminosity (Lsun), temp K
+# Spectral archetypes: mass (Msun), luminosity (Lsun), temp K
+# Display name of a system is a proper star name (e.g. Sol); planets are Sol-1, Sol-2, …
 STAR_TYPES = [
-    {"id": "M5V", "name": "Red dwarf (M5V)", "mass": 0.16, "lum": 0.007, "temp": 2800, "difficulty_bias": 1.35},
-    {"id": "K2V", "name": "Orange dwarf (K2V)", "mass": 0.78, "lum": 0.29, "temp": 4900, "difficulty_bias": 1.05},
-    {"id": "G2V", "name": "Sun-like (G2V)", "mass": 1.0, "lum": 1.0, "temp": 5772, "difficulty_bias": 0.9},
-    {"id": "F5V", "name": "F-type (F5V)", "mass": 1.3, "lum": 2.5, "temp": 6500, "difficulty_bias": 1.1},
+    {"id": "M5V", "spectral": "M5V", "class_label": "red dwarf", "mass": 0.16, "lum": 0.007, "temp": 2800, "difficulty_bias": 1.35},
+    {"id": "K2V", "spectral": "K2V", "class_label": "orange dwarf", "mass": 0.78, "lum": 0.29, "temp": 4900, "difficulty_bias": 1.05},
+    {"id": "G2V", "spectral": "G2V", "class_label": "yellow dwarf", "mass": 1.0, "lum": 1.0, "temp": 5772, "difficulty_bias": 0.9},
+    {"id": "F5V", "spectral": "F5V", "class_label": "F-type", "mass": 1.3, "lum": 2.5, "temp": 6500, "difficulty_bias": 1.1},
+]
+
+# Short proper names — one per system; bodies are named Star-1, Star-2, …
+STAR_PROPER_NAMES = [
+    "Sol", "Helios", "Tau", "Keid", "Rigel", "Vega", "Altair", "Deneb",
+    "Procyon", "Sirius", "Castor", "Pollux", "Algol", "Mira", "Spica",
+    "Antares", "Regulus", "Arcturus", "Capella", "Aldebaran", "Fomalhaut",
+    "Achernar", "Canopus", "Hadar", "Acrux", "Bellatrix", "Alnitak", "Saiph",
+    "Luyten", "Barnard", "Wolf", "Kapteyn", "Lacaille", "Groombridge",
+    "Cygnus", "Lyra", "Aquila", "Orion", "Perseus", "Draco", "Phoenix",
+    "Eridanus", "Carina", "Vela", "Pictor", "Indus", "Pavo", "Tucana",
+    "Hydra", "Corvus", "Crux", "Norma", "Ara", "Telescopium", "Horologium",
 ]
 
 
@@ -242,6 +255,11 @@ def generate_system(seed: Optional[int] = None, star_type_id: Optional[str] = No
         else:
             star = dict(rng.choice(STAR_TYPES))
 
+        # Proper name for THIS system only — planets are {name}-1, {name}-2, …
+        star_name = rng.choice(STAR_PROPER_NAMES)
+        star["name"] = star_name
+        star["designation"] = f"{star_name} ({star['spectral']})"
+
         # Scale orbital architecture with stellar mass (a ∝ M^{1/3} weak; we use √M for spacing feel)
         m = star["mass"]
         scale = math.sqrt(m)  # compress/expand Sol-like layout
@@ -284,7 +302,7 @@ def generate_system(seed: Optional[int] = None, star_type_id: Optional[str] = No
         planet_slots = filtered
 
         for i, (au, role) in enumerate(planet_slots):
-            body = _make_planet(rng, i, au, role, snow, hz_in, hz_out)
+            body = _make_planet(rng, i, au, role, snow, hz_in, hz_out, star_name)
             bodies.append(body)
             bodies.extend(_make_moons(rng, body, au, snow))
 
@@ -297,7 +315,7 @@ def generate_system(seed: Optional[int] = None, star_type_id: Optional[str] = No
             belt_au = snow * rng.uniform(0.95, 1.1)
         for a in range(rng.randint(4, 7)):
             au = belt_au * rng.uniform(0.93, 1.07)
-            bodies.append(_make_asteroid(rng, a, au, snow))
+            bodies.append(_make_asteroid(rng, a, au, snow, star_name))
 
         if _reject_trap(bodies):
             continue
@@ -313,7 +331,7 @@ def generate_system(seed: Optional[int] = None, star_type_id: Optional[str] = No
             py = period_seconds(giant.semi_major_m, G * star["mass"] * SOLAR_MASS) / SECONDS_PER_YEAR
             giant_note = f", gas giant ~{giant.semi_major_m/AU_M:.1f} AU ({py:.1f} y)"
         summary = (
-            f"{star['name']}: {n_p} planets, {n_m} moons, "
+            f"{star_name} ({star['spectral']}, {star['class_label']}): {n_p} planets, {n_m} moons, "
             f"snow line {snow:.2f} AU{giant_note}, difficulty {difficulty:.1f}/10"
         )
         return StarSystem(seed=s, star=star, bodies=bodies, difficulty=difficulty, survey_summary=summary)
@@ -329,6 +347,7 @@ def _make_planet(
     snow: float,
     hz_in: float,
     hz_out: float,
+    star_name: str,
 ) -> Body:
     if role == "gas_giant":
         mass = rng.uniform(50, 320) * EARTH_MASS  # ~0.15–1 MJup
@@ -360,9 +379,10 @@ def _make_planet(
         atmo = rng.random() < (0.55 if hz_in <= au <= hz_out else 0.3)
         note = "N₂/O₂/CO₂ mix possible" if atmo and hz_in <= au <= hz_out else ("thin CO₂" if atmo else "")
 
+    # Convention: Sol-3 style — star proper name + orbit index from the star
     return Body(
         id=f"p{i}",
-        name=_planet_name(rng, i),
+        name=f"{star_name}-{i + 1}",
         kind="planet",
         parent_id="star",
         mass_kg=mass,
@@ -425,10 +445,10 @@ def _make_moons(rng: random.Random, planet: Body, au: float, snow: float) -> Lis
     return moons
 
 
-def _make_asteroid(rng: random.Random, a: int, au: float, snow: float) -> Body:
+def _make_asteroid(rng: random.Random, a: int, au: float, snow: float, star_name: str) -> Body:
     return Body(
         id=f"a{a}",
-        name=f"Belt {a + 1}",
+        name=f"{star_name} Belt-{a + 1}",
         kind="asteroid",
         parent_id="star",
         mass_kg=rng.uniform(1e15, 5e18),
@@ -477,14 +497,6 @@ def _deposits_for(
     if pkind == "rocky" and au < snow:
         add("N", 0.25, (1e3, 5e5))
     return deps
-
-
-def _planet_name(rng: random.Random, i: int) -> str:
-    roots = [
-        "Kepler", "Helios", "Nyx", "Astra", "Vesper", "Cinder", "Glacis", "Ferrum",
-        "Thalassa", "Ember", "Frost", "Basalt", "Mir", "Orin", "Sable", "Juno",
-    ]
-    return f"{rng.choice(roots)}-{i + 1}"
 
 
 def _difficulty(star: dict, bodies: List[Body], snow: float) -> float:

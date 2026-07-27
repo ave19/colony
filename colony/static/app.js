@@ -76,10 +76,12 @@ function renderCatalog() {
       const g = c.gas_giant_period_years != null
         ? ` · gas giant ~${c.gas_giant_period_years} y`
         : "";
+      const title = c.star.designation || c.star.name;
       return `<div class="card">
-        <h3>${c.star.name}</h3>
+        <h3>${title}</h3>
         <p>${c.survey_summary}</p>
         <p>Outer ~${c.outer_au ?? "?"} AU${g} · difficulty ${c.difficulty}/10</p>
+        <p class="muted">Worlds named ${c.star.name}-1, ${c.star.name}-2, …</p>
         <button class="primary" data-seed="${c.seed}">Commit — go there</button>
       </div>`;
     })
