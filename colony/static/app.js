@@ -138,6 +138,7 @@ function render() {
 
   renderCatalog();
   renderDossierDetail();
+  renderEventSchedule();
   renderFleet();
   renderArkBay();
   renderUnitPanel();
@@ -148,6 +149,35 @@ function render() {
   renderContracts();
   renderStock();
   renderEvents();
+}
+
+function renderEventSchedule() {
+  const el = $("event-schedule");
+  if (!el || state.phase === "menu") {
+    if (el) el.innerHTML = "";
+    return;
+  }
+  const q = state.event_queue || [];
+  if (!q.length) {
+    el.innerHTML =
+      '<div class="queue-empty">No scheduled events. Real time still runs 1:1; Warp will not skip.</div>';
+    return;
+  }
+  el.innerHTML = q
+    .map((e, i) => {
+      const when =
+        e.years >= 0.5
+          ? `~${e.years.toFixed(2)} y`
+          : e.months >= 1
+            ? `~${e.months.toFixed(2)} mo`
+            : `~${Math.max(1, Math.round(e.months * 30))} d`;
+      const mark = i === 0 ? "next" : "";
+      return `<div class="queue-job ${mark}">
+        <div class="title">${e.label}</div>
+        <div class="meta">${when}${e.needs_confirm ? " · Warp will ask to confirm" : ""}</div>
+      </div>`;
+    })
+    .join("");
 }
 
 function isArkSelected() {

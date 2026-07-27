@@ -253,10 +253,14 @@ details.drawer summary {
 .queue-list { margin-bottom: 8px; }
 .queue-job {
   background: rgba(15, 24, 36, 0.95);
-  border: 1px solid var(--accent);
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
   margin-bottom: 8px;
+}
+.queue-job.next {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(74, 163, 240, 0.25);
 }
 .queue-job .title {
   font-weight: 600;

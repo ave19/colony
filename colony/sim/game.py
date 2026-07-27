@@ -375,12 +375,37 @@ class Game:
                 )
         for u in self.fleet.values():
             if u.status == "en_route" and u.months_left > 0:
-                goal = u.search_resource or u.order or "destination"
+                dest_id = u.target_id
+                # Mine orders target a site id; resolve body for labeling
+                dest_body = self.system.body_by_id(dest_id) if self.system else None
+                if not dest_body and self.system and u.order == "mine":
+                    site = self._find_mine_site(dest_id)
+                    if site:
+                        dest_body = self.system.body_by_id(site.body_id)
+                dest_name = dest_body.name if dest_body else (dest_id or "destination")
+                if u.order == "survey":
+                    if u.search_resource:
+                        mission = f"seek {RESOURCE_NAMES.get(u.search_resource, u.search_resource)}"
+                    else:
+                        mission = "broad survey"
+                    label = f"{u.name} arrives at {dest_name} ({mission})"
+                    kind = "survey_arrival"
+                elif u.order == "mine":
+                    label = f"{u.name} arrives at extraction site on {dest_name}"
+                    kind = "mine_arrival"
+                elif u.order == "move":
+                    label = f"{u.name} arrives at {dest_name}"
+                    kind = "arrival"
+                else:
+                    label = f"{u.name} arrives at {dest_name}"
+                    kind = "arrival"
                 items.append(
                     {
-                        "kind": "en_route",
-                        "label": f"{u.name} arrives ({goal})",
+                        "kind": kind,
+                        "label": label,
                         "months": u.months_left,
+                        "unit_id": u.id,
+                        "body_id": dest_body.id if dest_body else dest_id,
                     }
                 )
             elif u.status == "working" and u.order == "mine" and u.months_left > 0:
@@ -389,15 +414,21 @@ class Game:
                         "kind": "mine",
                         "label": f"{u.name} finishes mining shift",
                         "months": u.months_left,
+                        "unit_id": u.id,
                     }
                 )
             elif u.status == "working" and u.order == "survey":
                 res = u.search_resource or "broad survey"
+                res_name = RESOURCE_NAMES.get(res, res) if u.search_resource else "broad survey"
+                body = self.system.body_by_id(u.location_id) if self.system else None
+                where = body.name if body else u.location_id
                 items.append(
                     {
                         "kind": "survey",
-                        "label": f"{u.name} survey progress ({res})",
+                        "label": f"{u.name} survey checkpoint @ {where} ({res_name})",
                         "months": self.SURVEY_WARP_SLICE_MONTHS,
+                        "unit_id": u.id,
+                        "body_id": u.location_id,
                     }
                 )
         items.sort(key=lambda x: x["months"])
@@ -713,7 +744,8 @@ class Game:
             u.target_id = target_id
             u.search_resource = res
             goal = f"sources of {RESOURCE_NAMES.get(res, res)}" if res else "broad composition"
-            if travel <= 0.3 and u.location_id == target_id:
+            if u.location_id == target_id and travel < 0.05:
+                # Already on station — no transit event
                 u.status = "working"
                 u.months_left = 0.0
                 self._log(
@@ -722,11 +754,13 @@ class Game:
                     f"Stays until recalled.",
                 )
             else:
+                # Always schedule arrival on the event queue (even short hops)
                 u.status = "en_route"
-                u.months_left = travel
+                u.months_left = max(travel, 0.05)
                 self._log(
                     "order",
-                    f"{u.name} → {body.name} to find {goal}: {travel:.1f} mo transit.",
+                    f"{u.name} → {body.name} to find {goal}: "
+                    f"{u.months_left:.2f} mo transit (queued as arrival event).",
                 )
             return self.snapshot()
 

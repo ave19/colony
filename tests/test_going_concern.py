@@ -130,6 +130,27 @@ def test_directed_search_can_exhaust_missing_resource():
     assert "Fe" in body.seek_exhausted
 
 
+def test_survey_probe_arrival_is_on_event_queue():
+    g = Game(universe_seed=44)
+    g.open_survey_archive()
+    g.select_star(g.catalog[0]["seed"])
+    while g.phase == "transit":
+        g.warp_to_next_event(force=True)
+    g.queue_build("survey")
+    while not any(u.kind == "survey" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    sat = next(u for u in g.fleet.values() if u.kind == "survey")
+    dest = next(b for b in g.system.bodies if b.kind == "planet" and b.id != sat.location_id)
+    g.issue_order(sat.id, "survey", dest.id, resource="Fe")
+    assert sat.status == "en_route"
+    assert sat.months_left > 0
+    q = g.event_queue()
+    arrivals = [e for e in q if e.get("kind") == "survey_arrival"]
+    assert arrivals, f"expected survey_arrival in {q}"
+    assert dest.name in arrivals[0]["label"]
+    assert arrivals[0]["months"] == round(sat.months_left, 3)
+
+
 def test_warp_idle_skips_no_time():
     g = Game(universe_seed=9)
     g.open_survey_archive()
