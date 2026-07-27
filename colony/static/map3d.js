@@ -7,8 +7,8 @@ import * as THREE from "/static/vendor/three/three.module.js";
 import { OrbitControls } from "/static/vendor/three/addons/controls/OrbitControls.js";
 
 const AU_SCALE = 12; // scene units per sqrt(AU)
-// Match server catch-up: 1 wall second ≈ 1 game day / 7
-const GAME_SECONDS_PER_WALL = 86400 / 7;
+// Match server: real time 1:1 (Earth second = sim second). Warp jumps for logistics.
+const GAME_SECONDS_PER_WALL = 1;
 
 export class SystemMap3D {
   constructor(canvas) {

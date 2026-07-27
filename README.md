@@ -25,12 +25,14 @@ Open **http://localhost:8765/**
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/health` | Health |
-| GET | `/api/state` | Snapshot (advances wall clock) |
+| GET | `/api/state` | Snapshot (advances wall clock 1:1) |
 | POST | `/api/open_archive` or `/api/catalog` | View survey dossiers |
 | POST | `/api/select_star` | `{"seed": N}` commit dossier |
 | POST | `/api/build` | `{"unit_kind": "survey"\|"miner"\|"hauler"}` |
 | POST | `/api/order` | unit order (survey/mine/move/idle) |
-| POST | `/api/warp` | Advance to next event |
+| POST | `/api/warp` | Advance to next event (fab, transit, survey slices, …) |
+
+**Time:** sim runs real-time 1:1 with Earth seconds. Use **Warp** for the event queue — do not sit through multi-month fab in wall clock.
 
 ## Design docs
 

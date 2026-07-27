@@ -234,9 +234,9 @@ class Game:
         self.last_wall = now
         if self.phase == "menu":
             return 0.0
-        # Believable sky: live clock is slow. 1 wall second ≈ 1 game day / 7
-        # (Earth year ~ 42 wall minutes). Use Warp for logistics jumps.
-        game_dt_s = dt * (SECONDS_PER_DAY / 7.0)
+        # Real time 1:1 — one Earth second of wall clock = one second of sim time.
+        # Logistics (transit months, fab jobs, survey campaigns) use the event queue / Warp.
+        game_dt_s = dt
         return self.advance(game_dt_s)
 
     def advance(self, game_dt_s: float) -> float:

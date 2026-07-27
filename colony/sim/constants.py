@@ -1,7 +1,7 @@
 """Shared physical constants (SI-ish game units)."""
 
-# Game time: 1 sim-second of wall processing advances game by GAME_SECONDS_PER_REAL
-# but default is 1× real wall clock when server is running.
+# Game time: 1 wall-clock second = 1 sim second (real time).
+# Long actions advance via the event queue / warp-to-next-event.
 
 SECONDS_PER_DAY = 86400.0
 DAYS_PER_MONTH = 30.0  # game month (simplified calendar)

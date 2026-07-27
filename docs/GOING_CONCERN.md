@@ -2,8 +2,9 @@
 
 ## World
 
-- Simulation time advances while a room is active (wall-clock catch-up + warp-to-next-event).
-- Orbits use Keplerian periods; outer giants take years.
+- Simulation time is **real time 1:1** (one Earth second = one sim second) while a room is active.
+- Long work (transit, fab jobs, multi-month surveys) advances via the **event queue / Warp**.
+- Orbits use Keplerian periods; outer giants take years (you do not wait that out in real time).
 - Humanity already observes nearby stars; dossiers exist before you open them.
 
 ## Arrival
