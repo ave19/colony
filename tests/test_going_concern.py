@@ -684,3 +684,143 @@ def test_mine_then_haul_ore_to_ark():
     # Cargo arrived (may partially refine into steel via ark trickle)
     arrived = g.ark_stock.get("Fe", 0.0) + g.ark_stock.get("steel", 0.0)
     assert arrived >= took * 0.5  # at least half still present as Fe or refined steel
+
+
+def test_process_view_goals_and_discoveries_from_survey():
+    """Process board: overall goals + discovery journal from survey finds."""
+    g = Game(universe_seed=7)
+    _arrive(g)
+    snap = g.snapshot()
+    assert "process" in snap
+    pv = snap["process"]
+    assert pv["phase"] == "system"
+    goal_ids = {x["id"] for x in pv["goals"]}
+    assert "bootstrap_fleet" in goal_ids
+    assert "map_resources" in goal_ids
+    assert "first_ore" in goal_ids
+    assert "site_power" in goal_ids
+    assert "lift_chain" in goal_ids
+    assert "habitation" in goal_ids
+    assert pv["next_focus"] is not None
+    assert "survey" in (pv["next_focus"].get("next_step") or "").lower() or "fab" in (
+        pv["next_focus"].get("next_step") or ""
+    ).lower()
+
+    # Stock and fab a probe, force survey progress until a discovery posts
+    g.ark_stock["steel"] = 500
+    g.ark_stock["chip"] = 100
+    g.ark_stock["chem_prop"] = 200
+    g.ark_stock["Al"] = 100
+    g.queue_build("survey")
+    while not any(u.kind == "survey" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    sat = next(u for u in g.fleet.values() if u.kind == "survey")
+    rocky = next(b for b in g.system.bodies if b.kind == "planet" and b.planet_class == "rocky")
+    sat.location_id = rocky.id
+    g.issue_order(sat.id, "survey", rocky.id, resource="Fe")
+    for _ in range(100):
+        g.advance(SECONDS_PER_DAY * 15)
+        if g.discoveries:
+            break
+    assert g.discoveries, "expected at least one survey discovery"
+    d0 = g.discoveries[0]
+    assert d0["text"]
+    assert "kind" in d0
+    # Dedupe: same key does not double-post
+    n = len(g.discoveries)
+    g._discover(
+        d0["kind"],
+        d0["text"],
+        body_id=d0.get("body_id") or "",
+        resource=d0.get("resource") or "",
+        key=f"{d0['kind']}:{d0.get('body_id')}:{d0.get('resource')}:{d0['text']}"
+        if not d0.get("resource")
+        else f"found:{d0.get('body_id')}:{d0.get('resource')}",
+    )
+    # Use explicit key that may or may not match; force known key
+    g._discover("resource_found", "Iron found on X", body_id="x", resource="Fe", key="test-unique-a")
+    g._discover("resource_found", "Iron found on X", body_id="x", resource="Fe", key="test-unique-a")
+    assert sum(1 for d in g.discoveries if d.get("text") == "Iron found on X") == 1
+
+    pv2 = g.process_view()
+    assert pv2["discoveries"]
+    assert pv2["next_focus"]
+    assert "discoveries" in snap or "discoveries" in g.snapshot()
+
+
+def test_industry_structures_habitat_launch_fuel():
+    """Launch pad, rocket fab, fuel fab, recovery, habitat, extractor deploy."""
+    g = Game(universe_seed=8)
+    _arrive(g)
+    home = g.home_body_id
+    g.ark_stock.update(
+        {
+            "steel": 500,
+            "chip": 80,
+            "Al": 120,
+            "panel": 80,
+            "H2O": 50,
+            "chem_prop": 40,
+        }
+    )
+    for kind in (
+        "solar_farm",
+        "habitat_module",
+        "launch_pad",
+        "rocket_fab",
+        "fuel_fab",
+        "recovery_pad",
+        "extractor",
+    ):
+        g.queue_build(kind, deploy_body_id=home)
+        while any(j.status == "building" for j in g.build_queue):
+            g.warp_to_next_event(force=True)
+    site = g.sites[home]
+    for b in (
+        "solar_farm",
+        "habitat_module",
+        "launch_pad",
+        "rocket_fab",
+        "fuel_fab",
+        "recovery_pad",
+        "extractor",
+    ):
+        assert b in site.buildings, b
+
+    # Structure discoveries
+    kinds = {d["kind"] for d in g.discoveries}
+    assert "structure" in kinds
+
+    pv = g.process_view()
+    assert any(g_["id"] == "site_power" and g_["status"] == "done" for g_ in pv["goals"])
+    assert any(g_["id"] == "habitation" and g_["status"] == "done" for g_ in pv["goals"])
+    assert any(g_["id"] == "lift_chain" and g_["status"] == "done" for g_ in pv["goals"])
+    assert pv["industry"]["has_habitat"] is True
+    assert pv["industry"]["has_power"] is True
+
+    # Habitat enables population growth
+    pop0 = g.population
+    g.advance(SECONDS_PER_DAY * 365)
+    assert g.population > pop0
+
+    # Fuel fab converts CH4+O2
+    site.stockpile["CH4"] = 10.0
+    site.stockpile["O2"] = 10.0
+    site.stockpile["chem_prop"] = 0.0
+    g.advance(SECONDS_PER_DAY * 30)
+    assert site.stockpile.get("chem_prop", 0) > 0
+
+
+def test_structure_builds_catalog_includes_industry():
+    from colony.sim.tech import STRUCTURE_BUILDS
+
+    needed = {
+        "solar_farm",
+        "launch_pad",
+        "rocket_fab",
+        "fuel_fab",
+        "recovery_pad",
+        "habitat_module",
+        "extractor",
+    }
+    assert needed <= set(STRUCTURE_BUILDS.keys())

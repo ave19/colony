@@ -230,6 +230,8 @@ class Game:
         self.wall_anchor: float = time.time()
         self.last_wall: float = self.wall_anchor
         self.events: List[dict] = []
+        # Player-facing research/discovery journal (iron found, sites unlocked, …)
+        self.discoveries: List[dict] = []
         self.projects: Dict[str, Project] = {}
         self.contracts: Dict[str, Contract] = {}
         self.hauls: Dict[str, Haul] = {}
@@ -237,6 +239,8 @@ class Game:
         self.fleet: Dict[str, FleetUnit] = {}
         self.build_queue: List[BuildJob] = []
         self._unit_seq: Dict[str, int] = {"survey": 0, "miner": 0, "hauler": 0}
+        # Track which discovery keys already posted (avoid spam)
+        self._discovery_keys: set = set()
         # Ark inventory (materials / seed stock — specialized gear is built later)
         self.ark_stock: Dict[str, float] = {
             "Fe": SEED_FE_TONNES,
@@ -427,6 +431,17 @@ class Game:
             if notes:
                 for n in notes:
                     self._log("scan", f"Ark (terraform survey) {b.name}: {n}")
+                if self.hab_intel.get(b.id, 0) >= 5:
+                    doss = self.terraform_dossier(b.id)
+                    self._discover(
+                        "terraform",
+                        f"Terraform assessment complete for {b.name}: {doss.get('verdict', '')}",
+                        body_id=b.id,
+                        key=f"tf_done:{b.id}",
+                        next_step=(
+                            (doss.get("path") or ["Review Habitability tab."])[0]
+                        ),
+                    )
             break  # focus one body at a time
 
     def _advance_terraform_intel(self, body, *, remote: bool = True) -> List[str]:
@@ -934,6 +949,7 @@ class Game:
             self.scanned.add(b.id)
             if notes:
                 self._log("scan", f"Ark (belt survey) {b.name}: " + "; ".join(notes))
+                self._note_survey_discoveries(b, notes, source="ark")
             break
 
     def _ark_seek_resource(self, resource: str, months: float) -> None:
@@ -969,6 +985,7 @@ class Game:
                 f"Ark seeking {RESOURCE_NAMES.get(resource, resource)} @ {b.name}: "
                 + "; ".join(notes),
             )
+            self._note_survey_discoveries(b, notes, source="ark")
 
     def body_tree(self) -> List[dict]:
         """Hierarchical body list for UI: planets with nested moons, then belt."""
@@ -1086,7 +1103,42 @@ class Game:
                     " Artificial magnetosphere online at sunward L1 — "
                     "radiation shield for open-air settlement."
                 )
+            elif job.building_id == "habitat_module":
+                extra = " Living volume online — population can grow off-ark."
+            elif job.building_id == "launch_pad":
+                extra = " Chemical ascent pad ready — needs rockets + fuel."
+            elif job.building_id == "rocket_fab":
+                extra = " Building landers/boosters when materials allow."
+            elif job.building_id == "fuel_fab":
+                extra = " Producing chem_prop from CH₄/O₂ stock."
+            elif job.building_id == "recovery_pad":
+                extra = " Reusable booster recovery online."
+            elif job.building_id == "extractor":
+                extra = " Continuous mining on known deposits (needs power)."
             self._log("build", f"Deployed {job.name} at {where}.{extra}")
+            # Process journal: industry milestones
+            next_map = {
+                "solar_farm": "Power online — pair with extractor or mass driver.",
+                "chem_genset": "Baseload ready — keep chem_prop stocked.",
+                "mass_driver": "Arm the rail when power ≥18 MW; shoot ore to orbit.",
+                "launch_pad": "Build rocket fab + fuel plant to close the chemical lift loop.",
+                "rocket_fab": "Stock steel/Al/chips; pair with launch pad + fuel plant.",
+                "fuel_fab": "Feed CH₄/O₂ (or haul prop) — supplies pads and gensets.",
+                "recovery_pad": "Reusable flight loop closed — cut booster attrition.",
+                "habitat_module": "Settlers can grow population here; expand industry nearby.",
+                "extractor": "Haul ore home or feed a refinery / mass driver.",
+                "refuel_depot": "Send low-Δv craft here to top tanks.",
+                "l1_magnetic_shield": "Open-air settlement path unblocked if air/water allow.",
+            }
+            self._discover(
+                "structure",
+                f"{job.name} online at {where}",
+                body_id=body_id,
+                key=f"struct:{body_id}:{job.building_id}",
+                next_step=next_map.get(
+                    job.building_id, f"Integrate {job.name} into the site logistics loop."
+                ),
+            )
             return
 
         self._unit_seq[job.unit_kind] = self._unit_seq.get(job.unit_kind, 0) + 1
@@ -1408,6 +1460,389 @@ class Game:
         )
         self.events = self.events[:100]
         self.message = text
+
+    def _discover(
+        self,
+        kind: str,
+        text: str,
+        *,
+        body_id: str = "",
+        resource: str = "",
+        key: str = "",
+        next_step: str = "",
+    ) -> None:
+        """
+        Record a unique player-facing discovery (research journal).
+        `key` dedupes so the same find is not spammed every tick.
+        """
+        dedupe = key or f"{kind}:{body_id}:{resource}:{text}"
+        if dedupe in self._discovery_keys:
+            return
+        self._discovery_keys.add(dedupe)
+        t_mo = self.sim_time_s / (SECONDS_PER_DAY * DAYS_PER_MONTH)
+        entry = {
+            "id": _id(),
+            "t_months": round(t_mo, 3),
+            "t_years": round(t_mo / 12.0, 3),
+            "kind": kind,
+            "text": text,
+            "body_id": body_id,
+            "resource": resource,
+            "next_step": next_step,
+        }
+        self.discoveries.insert(0, entry)
+        self.discoveries = self.discoveries[:80]
+        self._log("discovery", text)
+
+    def _note_survey_discoveries(self, body, notes: List[str], source: str = "") -> None:
+        """Parse survey notes into structured discoveries + next steps."""
+        if not body or not notes:
+            return
+        for note in notes:
+            low = note.lower()
+            # Resource confirmed present
+            if "confirmed " in low and " present" in low:
+                # "confirmed Fe present"
+                parts = note.split()
+                res = parts[1] if len(parts) >= 2 else ""
+                self._discover(
+                    "resource_found",
+                    f"{RESOURCE_NAMES.get(res, res)} found on {body.name}",
+                    body_id=body.id,
+                    resource=res,
+                    key=f"found:{body.id}:{res}",
+                    next_step=f"Keep surveying {body.name} until an extraction site unlocks, then send a miner.",
+                )
+            elif "graded " in low:
+                # graded Fe
+                parts = note.split()
+                res = parts[1] if len(parts) >= 2 else ""
+                self._discover(
+                    "resource_graded",
+                    f"{RESOURCE_NAMES.get(res, res)} graded on {body.name}",
+                    body_id=body.id,
+                    resource=res,
+                    key=f"graded:{body.id}:{res}",
+                    next_step=f"Continue on-station survey of {body.name} to pin an extraction site.",
+                )
+            elif "extraction site" in low or ("suitable " in low and " site" in low):
+                # suitable Fe extraction site: …
+                res = ""
+                for token in note.replace("—", " ").split():
+                    if token in RESOURCE_NAMES or token in ("Fe", "Si", "Al", "H2O", "CH4", "Ni", "Cu"):
+                        res = token
+                        break
+                self._discover(
+                    "mine_site",
+                    f"Extraction site for {RESOURCE_NAMES.get(res, res or 'resource')} on {body.name}",
+                    body_id=body.id,
+                    resource=res,
+                    key=f"site:{body.id}:{res}",
+                    next_step=f"Deploy a mining bot to the site on {body.name}, then haul ore home or to a refinery.",
+                )
+            elif "spectral hint" in low:
+                self._discover(
+                    "hint",
+                    f"Spectral hint on {body.name}: {note}",
+                    body_id=body.id,
+                    key=f"hint:{body.id}:{note[:40]}",
+                    next_step=f"Focus a directed search on {body.name} for the hinted resource.",
+                )
+
+    def process_view(self) -> dict:
+        """
+        Colony process board: overall goals, system research state,
+        discoveries journal, and industrial deployment options.
+        """
+        months = self.sim_time_s / (SECONDS_PER_DAY * DAYS_PER_MONTH)
+        goals: List[dict] = []
+        research: Dict[str, Any] = {
+            "bodies_touched": 0,
+            "mine_sites": [],
+            "resources_known": [],
+            "terraform_leads": [],
+            "scanned_body_ids": list(self.scanned),
+        }
+        industry: Dict[str, Any] = {"structures_online": [], "gaps": []}
+
+        if self.phase == "menu":
+            goals.append(
+                {
+                    "id": "pick_star",
+                    "label": "Choose a destination",
+                    "status": "active",
+                    "detail": "Open the survey archive and commit to a star system.",
+                }
+            )
+        elif self.phase == "transit":
+            goals.append(
+                {
+                    "id": "arrive",
+                    "label": "Complete transit",
+                    "status": "active",
+                    "detail": f"Warp to arrival (~{self.transit_months_left/12:.1f} y remaining).",
+                }
+            )
+        elif self.phase == "system" and self.system:
+            # Fleet bootstrap
+            has_survey = any(u.kind == "survey" for u in self.fleet.values())
+            has_miner = any(u.kind == "miner" for u in self.fleet.values())
+            has_hauler = any(u.kind == "hauler" for u in self.fleet.values())
+            goals.append(
+                {
+                    "id": "bootstrap_fleet",
+                    "label": "Bootstrap fleet from ark fab",
+                    "status": "done"
+                    if (has_survey and has_miner and has_hauler)
+                    else "active",
+                    "detail": (
+                        f"Survey sats: {'✓' if has_survey else 'need'} · "
+                        f"Miners: {'✓' if has_miner else 'need'} · "
+                        f"Haulers: {'✓' if has_hauler else 'need'}"
+                    ),
+                }
+            )
+            # Map the system
+            sites_found = []
+            resources_known = set()
+            for b in self.system.bodies:
+                if b.id in self.scanned or b.survey_months > 0:
+                    research["bodies_touched"] += 1
+                for d in b.deposits:
+                    if d.known and d.detail >= 2:
+                        resources_known.add(d.resource)
+                for s in b.mine_sites:
+                    sites_found.append(
+                        {
+                            "body_id": b.id,
+                            "body_name": b.name,
+                            "resource": s.resource,
+                            "resource_name": RESOURCE_NAMES.get(s.resource, s.resource),
+                            "site_id": s.id,
+                            "region": s.region,
+                            "grade": s.grade,
+                        }
+                    )
+            research["mine_sites"] = sites_found
+            research["resources_known"] = sorted(resources_known)
+
+            goals.append(
+                {
+                    "id": "map_resources",
+                    "label": "Map resources & extraction sites",
+                    "status": "done" if sites_found else "active",
+                    "detail": (
+                        f"{len(sites_found)} extraction site(s) · "
+                        f"{len(resources_known)} resource type(s) confirmed · "
+                        f"{research['bodies_touched']} body(ies) touched by sensors"
+                    ),
+                }
+            )
+
+            # Terraform research
+            tf_leads = []
+            for b in self.system.bodies:
+                if b.kind not in ("planet", "moon"):
+                    continue
+                if b.planet_class in ("gas_giant", "ice_giant", "asteroid"):
+                    continue
+                doss = self.terraform_dossier(b.id)
+                if doss.get("level", 0) >= 1 or doss.get("in_hz"):
+                    tf_leads.append(
+                        {
+                            "body_id": b.id,
+                            "name": b.name,
+                            "level": doss.get("level", 0),
+                            "verdict": doss.get("verdict", ""),
+                            "verdict_status": doss.get("verdict_status", "unknown"),
+                            "score": doss.get("terraform_score"),
+                            "needs_l1_shield": doss.get("needs_l1_magnetic_shield"),
+                        }
+                    )
+            tf_leads.sort(key=lambda x: (-(x.get("score") or 0), -x["level"]))
+            research["terraform_leads"] = tf_leads[:12]
+            goals.append(
+                {
+                    "id": "terraform_intel",
+                    "label": "Find settlement / terraform targets",
+                    "status": "done"
+                    if any((t.get("level") or 0) >= 5 for t in tf_leads)
+                    else "active",
+                    "detail": (
+                        f"{sum(1 for t in tf_leads if (t.get('level') or 0) >= 5)} fully assessed · "
+                        f"{len(tf_leads)} lead(s). Enable ark terraform scan or probe rocky worlds."
+                    ),
+                }
+            )
+
+            # First industry
+            has_ore = any(s.get("resource") == "Fe" for s in sites_found) or any(
+                self.sites.get(bid) and self.sites[bid].stockpile.get("Fe", 0) > 0
+                for bid in self.sites
+            )
+            goals.append(
+                {
+                    "id": "first_ore",
+                    "label": "Stand up first ore loop",
+                    "status": "done" if has_ore and has_miner else "active",
+                    "detail": "Find Fe site → mine → haul to ark or refinery / launch facilities.",
+                }
+            )
+
+            # Industry inventory
+            for bid, site in self.sites.items():
+                if bid == "ark_orbit":
+                    continue
+                b = self.system.body_by_id(site.body_id) if self.system else None
+                for bl in site.buildings:
+                    if bl == "ark":
+                        continue
+                    industry["structures_online"].append(
+                        {
+                            "building": bl,
+                            "body_id": site.body_id,
+                            "body_name": b.name if b else site.body_id,
+                        }
+                    )
+            built = {s["building"] for s in industry["structures_online"]}
+            for sid, spec in STRUCTURE_BUILDS.items():
+                if sid not in built and spec.get("building") not in built:
+                    industry["gaps"].append(
+                        {
+                            "id": sid,
+                            "name": spec["name"],
+                            "description": spec.get("description", ""),
+                            "months": spec.get("months"),
+                        }
+                    )
+
+            # Power backbone
+            has_power = bool(
+                built & {"solar_farm", "chem_genset", "ark"}
+            ) or any(
+                "solar_farm" in s.buildings or "chem_genset" in s.buildings
+                for s in self.sites.values()
+            )
+            goals.append(
+                {
+                    "id": "site_power",
+                    "label": "Site power (solar / genset)",
+                    "status": "done" if has_power else "active",
+                    "detail": (
+                        "Solar farm or chem genset on a working body — required for mass drivers, "
+                        "extractors, and heavy industry."
+                        if not has_power
+                        else "Power plant online."
+                    ),
+                }
+            )
+
+            # Lift / chemical rocket chain (heavy-world path)
+            has_lift = bool(
+                built
+                & {"mass_driver", "launch_pad", "rocket_fab", "fuel_fab", "recovery_pad"}
+            )
+            lift_bits = []
+            for key, label in (
+                ("launch_pad", "launch pad"),
+                ("rocket_fab", "rocket fab"),
+                ("fuel_fab", "fuel plant"),
+                ("recovery_pad", "recovery"),
+                ("mass_driver", "mass driver"),
+            ):
+                lift_bits.append(f"{label}{'✓' if key in built else '·'}")
+            goals.append(
+                {
+                    "id": "lift_chain",
+                    "label": "Surface lift chain",
+                    "status": "done" if has_lift else "active",
+                    "detail": (
+                        "Light wells: mass driver + power. Heavy wells: launch pad + rocket fab + fuel + recovery. "
+                        + " · ".join(lift_bits)
+                    ),
+                }
+            )
+
+            # Habitation / population off-ark
+            has_hab = "habitat_module" in built
+            goals.append(
+                {
+                    "id": "habitation",
+                    "label": "Off-ark habitation",
+                    "status": "done" if has_hab else "active",
+                    "detail": (
+                        "Build a habitation module on a settlement body so population can grow beyond the ark."
+                        if not has_hab
+                        else f"Habitat online · pop {int(self.population):,}"
+                    ),
+                }
+            )
+
+            industry["has_power"] = has_power
+            industry["has_lift"] = has_lift
+            industry["has_habitat"] = has_hab
+            industry["built_kinds"] = sorted(built)
+
+            # Suggested next from latest discovery (or bootstrapping gaps)
+            next_focus = None
+            if self.discoveries:
+                d0 = self.discoveries[0]
+                next_focus = {
+                    "text": d0.get("text"),
+                    "next_step": d0.get("next_step"),
+                    "body_id": d0.get("body_id"),
+                    "resource": d0.get("resource"),
+                    "kind": d0.get("kind"),
+                }
+            elif not has_survey:
+                next_focus = {
+                    "text": "No survey craft yet",
+                    "next_step": "Open ark console → Fabrication → build a survey satellite, then Warp.",
+                }
+            elif not sites_found:
+                next_focus = {
+                    "text": "No extraction sites yet",
+                    "next_step": "Send a probe to a rocky world / belt, directed search for Fe, Warp for progress.",
+                }
+            elif has_ore and not has_power:
+                next_focus = {
+                    "text": "Ore loop starting — need site power",
+                    "next_step": "Ark fab → Solar farm or Chem genset on the working body.",
+                }
+            elif sites_found and not has_lift and has_power:
+                next_focus = {
+                    "text": "Power online — stand up lift",
+                    "next_step": (
+                        "Light body: Mass driver. Heavy world: Launch pad + Rocket fab + Fuel plant "
+                        "(+ Recovery pad for reusables)."
+                    ),
+                }
+
+            return {
+                "phase": self.phase,
+                "sim_months": round(months, 3),
+                "sim_years": round(months / 12.0, 3),
+                "goals": goals,
+                "research": research,
+                "industry": industry,
+                "discoveries": self.discoveries[:40],
+                "next_focus": next_focus,
+                "ark_scan_goals": list(self.ark_scan_goals),
+                "population": self.population,
+            }
+
+        return {
+            "phase": self.phase,
+            "sim_months": round(months, 3),
+            "sim_years": round(months / 12.0, 3),
+            "goals": goals,
+            "research": research,
+            "industry": industry,
+            "discoveries": self.discoveries[:40],
+            "next_focus": None,
+            "ark_scan_goals": list(self.ark_scan_goals),
+            "population": self.population,
+        }
 
     # --- menu / transit ---
     def open_survey_archive(self) -> List[dict]:
@@ -1898,6 +2333,7 @@ class Game:
                 "scan",
                 f"{u.name} @ {body.name} ({label}, {seek_t:.1f} mo): " + "; ".join(notes),
             )
+            self._note_survey_discoveries(body, notes, source=u.name)
         # On-station probes also deepen terraform dossiers (faster than remote ark)
         if body.planet_class in ("rocky", "moon") or (
             body.kind == "planet" and body.planet_class == "rocky"
@@ -1909,6 +2345,19 @@ class Game:
                 tnotes = self._advance_terraform_intel(body, remote=False)
                 for n in tnotes:
                     self._log("scan", f"{u.name} terraform intel @ {body.name}: {n}")
+                if tnotes and self.hab_intel.get(body.id, 0) >= 5:
+                    doss = self.terraform_dossier(body.id)
+                    self._discover(
+                        "terraform",
+                        f"Terraform assessment complete for {body.name}: {doss.get('verdict', '')}",
+                        body_id=body.id,
+                        key=f"tf_done:{body.id}",
+                        next_step=(
+                            doss.get("path") or ["Plan industry / L1 shield if required."]
+                        )[0]
+                        if doss.get("path")
+                        else "Review Habitability tab on the body card.",
+                    )
 
     def issue_order(
         self, unit_id: str, order: str, target_id: str = "", resource: str = ""
@@ -2688,7 +3137,7 @@ class Game:
         hab_sites = sum(
             1
             for s in self.sites.values()
-            if s.body_id != "ark_orbit" and "habitat" in s.buildings
+            if s.body_id != "ark_orbit" and "habitat_module" in s.buildings
         )
         if hab_sites <= 0:
             return
@@ -2724,9 +3173,21 @@ class Game:
                 if max_b > 0:
                     site.stockpile["Fe"] -= 1.2 * max_b
                     site.stockpile["steel"] = site.stockpile.get("steel", 0) + 1.0 * max_b
+            # Fuel plant: blend CH4 + O2 → chem_prop (or trickle from CH4 alone if O2 short)
+            if "fuel_fab" in site.buildings or "chem_plant" in site.buildings:
+                ch4 = site.stockpile.get("CH4", 0.0)
+                o2 = site.stockpile.get("O2", 0.0)
+                if ch4 > 0 and o2 > 0:
+                    batches = months / 0.05
+                    max_b = min(batches, ch4 / 0.4, o2 / 0.6)
+                    if max_b > 0:
+                        site.stockpile["CH4"] = ch4 - 0.4 * max_b
+                        site.stockpile["O2"] = o2 - 0.6 * max_b
+                        site.stockpile["chem_prop"] = (
+                            site.stockpile.get("chem_prop", 0.0) + 1.0 * max_b
+                        )
             if "scoop" in site.buildings and body.has_atmosphere and "CH4" in (body.atmosphere_note or "CH4"):
                 site.stockpile["CH4"] = site.stockpile.get("CH4", 0) + 8.0 * months
-            # also allow scoop if deposit CH4 known
             if "scoop" in site.buildings:
                 for dep in body.deposits:
                     if dep.known and dep.resource == "CH4" and dep.amount_t > 0:
@@ -2745,6 +3206,8 @@ class Game:
             "population": self.population,
             "ark_stock": {k: round(v, 2) for k, v in self.ark_stock.items()},
             "events": self.events[:30],
+            "discoveries": self.discoveries[:40],
+            "process": self.process_view() if self.phase in ("system", "transit", "menu") else {},
             "catalog": self.catalog,
             "archive_opened": self.archive_opened,
             "survey_archive_count": len(self.survey_archive),

@@ -7,7 +7,7 @@ let selectedBodyId = null;
 let selectedDossierSeed = null;
 let expandedPlanets = new Set(); // body ids with moons shown
 let map = null;
-/** Cascade command window: null | { kind: 'ark', tab: string } */
+/** Cascade command window: null | { kind: 'ark'|'unit'|'body'|'process', tab?: string, ... } */
 let cascade = null;
 
 const $ = (id) => document.getElementById(id);
@@ -451,12 +451,23 @@ function renderEventSchedule() {
     .join("");
 }
 
-/** Large command window cascade (ark console, unit action cards, body cards). */
+/** Large command window cascade (ark console, unit action cards, body cards, process). */
 function renderCascade() {
   const root = $("cascade");
   if (!root) return;
 
-  if (state.phase !== "system" || !cascade) {
+  if (!cascade) {
+    root.hidden = true;
+    return;
+  }
+
+  // Process board is available in every phase (menu / transit / system)
+  if (cascade.kind === "process") {
+    renderProcessCascade(root);
+    return;
+  }
+
+  if (state.phase !== "system") {
     root.hidden = true;
     return;
   }
@@ -500,6 +511,348 @@ function renderCascade() {
 
   cascade = null;
   root.hidden = true;
+}
+
+function openProcessCascade(tab) {
+  cascade = {
+    kind: "process",
+    tab:
+      tab ||
+      (cascade && cascade.kind === "process" && cascade.tab) ||
+      "overview",
+  };
+  renderSafe();
+}
+
+function renderProcessCascade(root) {
+  root.hidden = false;
+  root.querySelector(".cascade-window")?.classList.remove("unit-card");
+  root.querySelector(".cascade-window")?.classList.remove("body-card");
+  root.querySelector(".cascade-window")?.classList.add("process-card");
+
+  const tab = cascade.tab || "overview";
+  cascade.tab = tab;
+  const p = state.process || {};
+  const next = p.next_focus;
+  const discCount = (p.discoveries || state.discoveries || []).length;
+
+  $("cascade-kicker").textContent = "Colony process · research & industry";
+  $("cascade-title").textContent = "Process board";
+  $("cascade-sub").textContent = next
+    ? `Focus: ${next.text || "—"}${next.next_step ? " → " + next.next_step : ""}`
+    : state.phase === "menu"
+      ? "Pick a star from the survey archive to begin."
+      : state.phase === "transit"
+        ? "In transit — warp to arrival, then map the system."
+        : "Survey, mine, and industrialize this system.";
+
+  const tabs = [
+    { id: "overview", label: "Overview" },
+    { id: "research", label: "Research" },
+    { id: "discoveries", label: `Discoveries${discCount ? " · " + discCount : ""}` },
+    { id: "industry", label: "Industry" },
+  ];
+  $("cascade-tabs").innerHTML = tabs
+    .map(
+      (t) =>
+        `<button type="button" class="cascade-tab ${t.id === tab ? "active" : ""}" data-tab="${t.id}">${t.label}</button>`
+    )
+    .join("");
+  $("cascade-tabs").querySelectorAll("[data-tab]").forEach((btn) => {
+    btn.onclick = () => {
+      cascade = { kind: "process", tab: btn.dataset.tab };
+      renderCascade();
+    };
+  });
+
+  const body = $("cascade-body");
+  if (tab === "research") body.innerHTML = processResearchHtml(p);
+  else if (tab === "discoveries") body.innerHTML = processDiscoveriesHtml(p);
+  else if (tab === "industry") body.innerHTML = processIndustryHtml(p);
+  else body.innerHTML = processOverviewHtml(p);
+
+  bindProcessCascade(body, tab);
+}
+
+function goalStatusClass(st) {
+  if (st === "done") return "goal-done";
+  if (st === "active") return "goal-active";
+  return "goal-pending";
+}
+
+function processOverviewHtml(p) {
+  const goals = p.goals || [];
+  const next = p.next_focus;
+  const goalsHtml = goals.length
+    ? goals
+        .map((g) => {
+          const cls = goalStatusClass(g.status);
+          const mark = g.status === "done" ? "✓" : g.status === "active" ? "●" : "○";
+          return `<div class="process-goal ${cls}">
+            <span class="pg-mark">${mark}</span>
+            <span class="pg-body">
+              <strong>${escapeHtml(g.label || g.id)}</strong>
+              <span class="pg-detail">${escapeHtml(g.detail || "")}</span>
+            </span>
+          </div>`;
+        })
+        .join("")
+    : '<p class="muted">No goals for this phase yet.</p>';
+
+  const focusHtml = next
+    ? `<div class="card process-focus">
+        <h3>Next focus</h3>
+        <p class="pf-text">${escapeHtml(next.text || "")}</p>
+        <p class="pf-step">${escapeHtml(next.next_step || "")}</p>
+        ${
+          next.body_id
+            ? `<button type="button" class="primary" data-goto-body="${escapeHtml(
+                next.body_id
+              )}" style="margin-top:10px">Open body card</button>`
+            : ""
+        }
+      </div>`
+    : `<div class="card process-focus">
+        <h3>Next focus</h3>
+        <p class="muted">No active lead — open Survey priorities or fab a probe.</p>
+      </div>`;
+
+  const research = p.research || {};
+  const sites = research.mine_sites || [];
+  const snap = `
+    <div class="cascade-split" style="margin-top:12px">
+      <div class="card">
+        <h3>System research</h3>
+        <p><strong>${research.bodies_touched || 0}</strong> bodies touched</p>
+        <p><strong>${sites.length}</strong> extraction site(s)</p>
+        <p><strong>${(research.resources_known || []).length}</strong> resource type(s)</p>
+        <p class="muted">${(research.resources_known || []).join(", ") || "none confirmed"}</p>
+      </div>
+      <div class="card">
+        <h3>Industry</h3>
+        <p><strong>${((p.industry || {}).structures_online || []).length}</strong> structure(s) online</p>
+        <p class="muted">${
+          ((p.industry || {}).built_kinds || []).join(", ") || "nothing deployed yet"
+        }</p>
+        <p style="margin-top:8px"><strong>Pop</strong> ${(
+          p.population != null ? p.population : state.population || 0
+        ).toLocaleString()}</p>
+      </div>
+    </div>`;
+
+  return `
+    <p class="cascade-section-lead">
+      Colony goals, research state for deployment targets, and a journal of finds
+      (e.g. <em>“iron found on Norma-2”</em> → next step: pin an extraction site).
+      Use this board when you need “what should I do next?”
+    </p>
+    ${focusHtml}
+    <h2 style="margin-top:16px">Goals</h2>
+    <div class="process-goals">${goalsHtml}</div>
+    ${snap}
+  `;
+}
+
+function processResearchHtml(p) {
+  const r = p.research || {};
+  const sites = r.mine_sites || [];
+  const leads = r.terraform_leads || [];
+  const siteRows = sites.length
+    ? sites
+        .map(
+          (s) => `<button type="button" class="process-row" data-goto-body="${s.body_id}">
+            <span class="pr-title">${escapeHtml(s.resource_name || s.resource)} · ${escapeHtml(
+              s.body_name
+            )}</span>
+            <span class="pr-meta">${escapeHtml(s.region || s.site_id || "")}${
+              s.grade != null ? " · grade " + Number(s.grade).toFixed(2) : ""
+            }</span>
+          </button>`
+        )
+        .join("")
+    : '<p class="muted">No extraction sites yet. Survey rocky worlds and the belt; use directed Fe/H₂O searches.</p>';
+
+  const leadRows = leads.length
+    ? leads
+        .map((t) => {
+          const vs = t.verdict_status || "unknown";
+          return `<button type="button" class="process-row" data-goto-body="${t.body_id}">
+            <span class="pr-title">${escapeHtml(t.name)} · L${t.level || 0}/5</span>
+            <span class="pr-meta ${factorStatusClass(vs)}">${escapeHtml(t.verdict || "—")}${
+              t.needs_l1_shield ? " · needs L1 shield" : ""
+            }</span>
+          </button>`;
+        })
+        .join("")
+    : '<p class="muted">No terraform leads yet. Ark console → Survey priorities → “Find terraform / habitability targets”.</p>';
+
+  return `
+    <p class="cascade-section-lead">
+      Where can you deploy miners, power, and lift? Extraction sites unlock from survey;
+      terraform leads guide settlement / L1 shield work.
+    </p>
+    <h2>Extraction sites (${sites.length})</h2>
+    <div class="process-list">${siteRows}</div>
+    <h2 style="margin-top:16px">Terraform / settlement leads</h2>
+    <div class="process-list">${leadRows}</div>
+    <p class="muted" style="margin-top:12px">
+      Bodies touched by sensors: <strong>${r.bodies_touched || 0}</strong> ·
+      Confirmed resources: <strong>${(r.resources_known || []).join(", ") || "—"}</strong>
+    </p>
+  `;
+}
+
+function processDiscoveriesHtml(p) {
+  const list = p.discoveries || state.discoveries || [];
+  if (!list.length) {
+    return `
+      <p class="cascade-section-lead">
+        Discoveries appear as the ark and probes learn the system —
+        iron confirmed, sites unlocked, terraform assessments complete, structures online.
+      </p>
+      <p class="empty">No discoveries yet. Fab a survey sat, set ark scan goals, Warp.</p>`;
+  }
+  const rows = list
+    .map((d) => {
+      const when =
+        d.t_years != null
+          ? `${Number(d.t_years).toFixed(2)} y`
+          : d.t_months != null
+            ? `${Number(d.t_months).toFixed(1)} mo`
+            : "";
+      const kind = d.kind || "note";
+      return `<div class="discovery-entry kind-${escapeHtml(kind)}">
+        <div class="d-head">
+          <span class="d-kind">${escapeHtml(kind.replace(/_/g, " "))}</span>
+          <span class="d-when">${when}</span>
+        </div>
+        <div class="d-text">${escapeHtml(d.text || "")}</div>
+        ${
+          d.next_step
+            ? `<div class="d-next">→ ${escapeHtml(d.next_step)}</div>`
+            : ""
+        }
+        ${
+          d.body_id
+            ? `<button type="button" class="linkish" data-goto-body="${escapeHtml(
+                d.body_id
+              )}">Open ${escapeHtml(bodyById(d.body_id)?.name || d.body_id)}</button>`
+            : ""
+        }
+      </div>`;
+    })
+    .join("");
+  return `
+    <p class="cascade-section-lead">
+      History of research events. Read the latest, take the suggested next step
+      (e.g. extraction site → send a miner).
+    </p>
+    <div class="discovery-log">${rows}</div>
+  `;
+}
+
+function processIndustryHtml(p) {
+  const ind = p.industry || {};
+  const online = ind.structures_online || [];
+  const gaps = ind.gaps || [];
+  const onlineHtml = online.length
+    ? online
+        .map(
+          (s) => `<div class="chip process-chip">
+            <span class="k">${escapeHtml(s.body_name || s.body_id)}</span>
+            <span class="v">${escapeHtml(s.building)}</span>
+          </div>`
+        )
+        .join("")
+    : '<p class="muted">No site structures deployed yet.</p>';
+
+  // Group deployable structures for the player
+  const groups = [
+    {
+      title: "Power",
+      ids: ["solar_farm", "chem_genset"],
+    },
+    {
+      title: "Mining & process",
+      ids: ["extractor", "refuel_depot"],
+    },
+    {
+      title: "Lift (light wells)",
+      ids: ["mass_driver"],
+    },
+    {
+      title: "Lift (chemical / heavy)",
+      ids: ["launch_pad", "rocket_fab", "fuel_fab", "recovery_pad"],
+    },
+    {
+      title: "Settlement",
+      ids: ["habitat_module", "l1_magnetic_shield"],
+    },
+  ];
+  const specs = state.structure_builds || {};
+  const built = new Set(ind.built_kinds || online.map((s) => s.building));
+  const groupHtml = groups
+    .map((g) => {
+      const cards = g.ids
+        .map((id) => {
+          const s = specs[id];
+          if (!s) return "";
+          const have = built.has(s.building || id);
+          const cost = Object.entries(s.cost || {})
+            .map(([k, v]) => `${v} ${k}`)
+            .join(", ");
+          return `<div class="card ${have ? "struct-online" : ""}">
+            <h3>${escapeHtml(s.name)} ${have ? "✓" : ""}</h3>
+            <p>${escapeHtml(s.description || "")}</p>
+            <p class="muted">${cost} · ${s.months} mo · ark fab bay</p>
+          </div>`;
+        })
+        .join("");
+      return cards
+        ? `<h2 style="margin-top:14px">${escapeHtml(g.title)}</h2>
+           <div class="cascade-grid">${cards}</div>`
+        : "";
+    })
+    .join("");
+
+  return `
+    <p class="cascade-section-lead">
+      Deploy from the ark fabrication bay (one job at a time). Structures land on a chosen body.
+      Power first → mining/lift → habitat. Heavy worlds need the chemical rocket chain;
+      light moons/asteroids can use mass drivers.
+    </p>
+    <h2>Online now</h2>
+    <div class="cascade-stock" style="margin-bottom:12px">${onlineHtml}</div>
+    <button type="button" class="primary" id="btn-process-open-fab" style="width:100%;margin-bottom:8px"
+      ${state.phase !== "system" ? "disabled" : ""}>
+      Open ark fabrication bay
+    </button>
+    ${groupHtml}
+    ${
+      gaps.length
+        ? `<p class="muted" style="margin-top:14px">${gaps.length} structure type(s) not yet built anywhere in-system.</p>`
+        : ""
+    }
+  `;
+}
+
+function bindProcessCascade(bodyEl, tab) {
+  bodyEl.querySelectorAll("[data-goto-body]").forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.dataset.gotoBody;
+      if (!id || state.phase !== "system") return;
+      selectedBodyId = id;
+      if (map) map.setSelected(id);
+      openBodyCascade(id, "overview");
+    };
+  });
+  const fab = bodyEl.querySelector("#btn-process-open-fab");
+  if (fab) {
+    fab.onclick = () => {
+      if (state.phase !== "system") return;
+      openArkCascade("fab");
+    };
+  }
 }
 
 function renderBodyCascade(root, b) {
@@ -1683,7 +2036,9 @@ function arkCascadeFabHtml() {
   return `
     <p class="cascade-section-lead">
       One fabrication bay — only <strong>one job at a time</strong>. Finish (warp) the current job before authorizing the next.
-      Structures: refuel depots, <strong>mass drivers</strong> (railguns on light moons/asteroids).
+      Structures: <strong>power</strong> (solar / genset), <strong>mining</strong> (extractor),
+      <strong>lift</strong> (mass driver or launch pad + rocket fab + fuel + recovery),
+      <strong>habitat</strong>, depots, L1 shield. See the Process board for goals.
     </p>
     <h2>Bay (single berth)</h2>
     <div class="queue-list">${queueHtml}</div>
@@ -2440,6 +2795,9 @@ $("btn-reset").onclick = async () => {
   map.clearSystem();
   render();
 };
+if ($("btn-process")) {
+  $("btn-process").onclick = () => openProcessCascade("overview");
+}
 $("btn-focus-system").onclick = () => map && map.focusSystem();
 $("btn-focus-sel").onclick = () => {
   if (!map) return;
