@@ -1341,22 +1341,36 @@ function renderBodyPanel() {
   const bld = (b.site_buildings || []).filter((x) => x && x !== "ark");
   const bldLine = bld.length ? bld.join(", ") : "";
   const hasDriver = b.has_mass_driver;
+  const driverOnline = b.mass_driver_online;
   const driverOk = b.mass_driver_ok;
+  const powerMw = b.site_power_mw || 0;
+  const needMw = b.mass_driver_power_need_mw || 18;
   let liftNote = "";
-  if (hasDriver) {
-    liftNote = `<p class="muted" style="color:var(--good)">⚡ Mass driver online — rail launch (no chemical ascent). Bots get lift assist.</p>`;
+  if (driverOnline) {
+    liftNote = `<p class="muted" style="color:var(--good)">⚡ Mass driver online · ${powerMw} MW bus — rail launch (no chemical ascent).</p>`;
+  } else if (hasDriver) {
+    liftNote = `<p class="muted" style="color:#e8a23a">⚡ Mass driver built but unpowered · ${powerMw}/${needMw} MW — add solar farm or chem genset.</p>`;
   } else if (driverOk) {
-    liftNote = `<p class="muted">Light well (~${b.dv_to_orbit_m_s} m/s ↑orbit) — suitable for a <strong>mass driver</strong> (ark fab).</p>`;
+    liftNote = `<p class="muted">Light well (~${b.dv_to_orbit_m_s} m/s ↑orbit) — mass driver + power plant possible (ark fab).</p>`;
   } else {
     liftNote = `<p class="muted">Deep well — mass drivers not practical; use chemical lift / haulers.</p>`;
   }
+  const powerLine = `<p class="muted"><strong>Site power</strong> ${powerMw} MW${
+    bld.includes("solar_farm") || bld.includes("chem_genset") || bld.includes("ark")
+      ? ""
+      : " · no generators"
+  }</p>`;
 
   let massLaunchHtml = "";
   if (hasDriver && stockKeys.length) {
     massLaunchHtml = `
       <h2>Mass driver launch</h2>
       <div class="card">
-        <p class="muted">Shoot surface cargo to orbit path without a hauler or chem_prop.</p>
+        <p class="muted">${
+          driverOnline
+            ? `Shoot surface cargo electrically (${powerMw} MW bus, ≥${needMw} MW required).`
+            : `Needs ≥${needMw} MW — currently ${powerMw} MW. Build solar farm or chem genset first.`
+        }</p>
         <label>Cargo
           <select id="md-resource">${stockKeys
             .map((k) => `<option value="${k}">${k} (${stock[k]} t)</option>`)
@@ -1374,8 +1388,10 @@ function renderBodyPanel() {
               .join("")}
           </select>
         </label>
-        <button type="button" class="primary" id="btn-mass-launch" style="width:100%;margin-top:10px">
-          Fire mass driver
+        <button type="button" class="primary" id="btn-mass-launch" style="width:100%;margin-top:10px" ${
+          driverOnline ? "" : "disabled"
+        }>
+          ${driverOnline ? "Fire mass driver" : "No power — cannot fire"}
         </button>
       </div>`;
   }
@@ -1387,6 +1403,7 @@ function renderBodyPanel() {
     <h2>Facts</h2>
     ${orbitFact}
     <p><strong>Δv</strong> ↑orbit ${b.dv_to_orbit_m_s} · esc ${b.dv_escape_from_orbit_m_s} m/s</p>
+    ${powerLine}
     ${liftNote}
     <p><strong>Site search</strong> ${sm.toFixed(1)} mo on station</p>
     <h2>Intel</h2>
@@ -1660,7 +1677,11 @@ function renderHaulPanel(opts = {}) {
     const stock = b.site_stockpile || {};
     const keys = Object.keys(stock).filter((k) => stock[k] > 0);
     if (keys.length) {
-      const rail = b.has_mass_driver ? " ⚡rail" : "";
+      const rail = b.mass_driver_online
+        ? " ⚡rail"
+        : b.has_mass_driver
+          ? " ⚡unpowered"
+          : "";
       origins.push({
         id: b.id,
         label: `${b.name} stockpile${rail} (${keys.map((k) => k + " " + stock[k]).join(", ")})`,

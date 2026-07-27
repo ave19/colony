@@ -87,8 +87,15 @@ BUILDINGS = {
         "solar_farm",
         "Solar farm",
         {"panel": 50, "steel": 10, "chip": 2},
-        "Local power from starlight.",
+        "Local power from starlight. Output falls with distance² and weak stars.",
         ["power_solar"],
+    ),
+    "chem_genset": BuildingType(
+        "chem_genset",
+        "Chemical genset",
+        {"steel": 25, "chip": 2, "chem_prop": 15},
+        "Bootstrap baseload power. Burns chem_prop while loads run.",
+        ["power_chem"],
     ),
     "habitat": BuildingType(
         "habitat",
@@ -115,10 +122,14 @@ BUILDINGS = {
         "mass_driver",
         "Mass driver (railgun)",
         {"steel": 90, "chip": 8, "Al": 40, "panel": 20},
-        "Electromagnetic launcher for light worlds. Shoots cargo (and assists bots) off the surface without chemical ascent.",
+        "Electromagnetic launcher for light worlds. Needs continuous site power "
+        "(≥18 MW) — pair with a solar farm or chem genset. Shoots cargo without chemical ascent.",
         ["mass_launch"],
     ),
 }
+
+# Continuous power draw while the rail is armed / launching.
+MASS_DRIVER_POWER_MW = 18.0
 
 
 RECIPES = {
@@ -317,6 +328,24 @@ UNIT_BUILDS = {
 
 # Site structures the ark fabricates then deploys to a body (not fleet units).
 STRUCTURE_BUILDS = {
+    "solar_farm": {
+        "id": "solar_farm",
+        "name": "Solar farm",
+        "kind": "structure",
+        "building": "solar_farm",
+        "cost": {"panel": 50.0, "steel": 10.0, "chip": 2.0},
+        "months": 2.0,
+        "description": "Site power from starlight. Weaker on outer orbits / dim stars. Required (or genset) to run a mass driver.",
+    },
+    "chem_genset": {
+        "id": "chem_genset",
+        "name": "Chemical genset",
+        "kind": "structure",
+        "building": "chem_genset",
+        "cost": {"steel": 25.0, "chip": 2.0, "chem_prop": 15.0},
+        "months": 1.5,
+        "description": "Bootstrap baseload. Burns chem_prop when loads (e.g. mass driver) fire.",
+    },
     "refuel_depot": {
         "id": "refuel_depot",
         "name": "Refueling depot",
@@ -333,9 +362,8 @@ STRUCTURE_BUILDS = {
         "building": "mass_driver",
         "cost": {"steel": 90.0, "chip": 8.0, "Al": 40.0, "panel": 20.0},
         "months": 4.0,
-        "description": "Railgun launcher for asteroids, moons, and other light wells. "
-        "Shoots ore off the surface (no chemical ascent) and assists bots leaving the body. "
-        "Won't work on deep gravity wells.",
+        "description": "Railgun for light wells. Requires ≥18 MW site power (solar farm and/or chem genset). "
+        "Shoots ore without chemical ascent; assists bots leaving the body. Not for deep wells.",
     },
 }
 

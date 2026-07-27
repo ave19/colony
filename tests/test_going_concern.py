@@ -389,18 +389,29 @@ def test_mass_driver_on_light_body_and_launch():
         None,
     )
     assert body is not None, "need a light body for mass driver"
-    g.ark_stock["steel"] = 200
+    g.ark_stock["steel"] = 300
     g.ark_stock["chip"] = 40
     g.ark_stock["Al"] = 80
-    g.ark_stock["panel"] = 40
+    g.ark_stock["panel"] = 80
+    g.ark_stock["chem_prop"] = 80
+    # Chem genset: reliable baseload even on outer/dim bodies
+    g.queue_build("chem_genset", deploy_body_id=body.id)
+    while any(j.status == "building" for j in g.build_queue):
+        g.warp_to_next_event(force=True)
     g.queue_build("mass_driver", deploy_body_id=body.id)
     while any(j.status == "building" for j in g.build_queue):
         g.warp_to_next_event(force=True)
     assert "mass_driver" in g.sites[body.id].buildings
+    assert "chem_genset" in g.sites[body.id].buildings
+    # Seed genset fuel (build cost may have spent ark prop)
+    g.sites[body.id].stockpile["chem_prop"] = max(
+        g.sites[body.id].stockpile.get("chem_prop", 0.0), 20.0
+    )
+    assert g.mass_driver_online(body.id)
+    assert g.site_power_mw(body.id) >= 18.0
 
-    # Stock ore and launch to ark without chem_prop
+    # Stock ore and launch to ark without rocket propellant
     g.sites[body.id].stockpile["Fe"] = 40.0
-    # Freeze ark Fe so trickle foundry doesn't hide the delivery
     g.ark_stock["Fe"] = 0.0
     g.mass_launch(body.id, "ark", "Fe", 15.0)
     assert g.sites[body.id].stockpile["Fe"] == 25.0
@@ -408,7 +419,6 @@ def test_mass_driver_on_light_body_and_launch():
     assert haul.propellant_t == 0.0
     while any(h.status == "in_flight" for h in g.hauls.values()):
         g.warp_to_next_event(force=True)
-    # Arrived as Fe and/or refined steel via ark trickle
     arrived = g.ark_stock.get("Fe", 0.0) + g.ark_stock.get("steel", 0.0)
     assert arrived >= 10.0
 
@@ -429,14 +439,42 @@ def test_mass_driver_on_light_body_and_launch():
             assert "mass driver" in str(e).lower() or "deep" in str(e).lower() or "well" in str(e).lower()
 
 
+def test_mass_driver_needs_power():
+    g = Game(universe_seed=82)
+    _arrive(g)
+    body = next(b for b in g.system.bodies if g.body_allows_mass_driver(b))
+    from colony.sim.game import Site
+
+    g.sites[body.id] = Site(
+        body_id=body.id, buildings=["mass_driver"], stockpile={"Fe": 20.0}
+    )
+    assert not g.mass_driver_online(body.id)
+    try:
+        g.mass_launch(body.id, "ark", "Fe", 5.0)
+        assert False, "unpowered rail should fail"
+    except ValueError as e:
+        assert "MW" in str(e) or "power" in str(e).lower()
+    # Chem genset + fuel brings it online anywhere
+    g.sites[body.id].buildings.append("chem_genset")
+    g.sites[body.id].stockpile["chem_prop"] = 10.0
+    assert g.mass_driver_online(body.id)
+    g.mass_launch(body.id, "ark", "Fe", 5.0)
+
+
 def test_haul_from_mass_driver_cheaper_than_chemical():
     g = Game(universe_seed=81)
     _arrive(g)
     body = next(b for b in g.system.bodies if g.body_allows_mass_driver(b))
-    g.sites.setdefault(body.id, __import__("colony.sim.game", fromlist=["Site"]).Site(body_id=body.id))
+    from colony.sim.game import Site
+
+    g.sites[body.id] = Site(body_id=body.id, buildings=[], stockpile={"chem_prop": 20.0})
     # Without driver
     opts_chem = g.haul_options(body.id, "ark")
     g.sites[body.id].buildings.append("mass_driver")
+    # Unpowered rail still pays chemical ascent
+    opts_unpowered = g.haul_options(body.id, "ark")
+    assert opts_unpowered[0].get("mass_driver_ascent") is False
+    g.sites[body.id].buildings.append("chem_genset")
     opts_rail = g.haul_options(body.id, "ark")
     assert opts_rail[0]["propellant_t"] < opts_chem[0]["propellant_t"]
     assert opts_rail[0].get("mass_driver_ascent") is True

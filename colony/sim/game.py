@@ -20,6 +20,7 @@ from .tech import (
     BUILDINGS,
     HAB_OPTIONS,
     MASS_DRIVER_MAX_SURFACE_DV_M_S,
+    MASS_DRIVER_POWER_MW,
     POWER_OPTIONS,
     RECIPES,
     RESOURCE_NAMES,
@@ -29,6 +30,7 @@ from .tech import (
     tech_book_summary,
 )
 from .orbits import dv_surface_to_orbit
+from .constants import AU_M
 
 
 def _id() -> str:
@@ -577,7 +579,14 @@ class Game:
             if job.building_id == "refuel_depot":
                 extra = " Units can refuel Δv here."
             elif job.building_id == "mass_driver":
-                extra = " Cargo can launch without chemical ascent; bots get lift assist."
+                extra = (
+                    f" Needs ≥{MASS_DRIVER_POWER_MW:.0f} MW site power to fire "
+                    "(solar farm / chem genset)."
+                )
+            elif job.building_id == "solar_farm":
+                extra = " Feeding local power bus."
+            elif job.building_id == "chem_genset":
+                extra = " Baseload available while chem_prop lasts."
             self._log("build", f"Deployed {job.name} at {where}.{extra}")
             return
 
@@ -943,6 +952,81 @@ class Game:
         site = self.sites.get(body_id)
         return bool(site and building_id in site.buildings)
 
+    def site_power_mw(self, body_id: str) -> float:
+        """
+        Available electrical power at a site (MW).
+        Solar scales with stellar luminosity / a²; chem genset needs fuel in stockpile.
+        """
+        if not self.system:
+            return 0.0
+        site = self.sites.get(body_id)
+        if not site:
+            return 0.0
+        body = self.system.body_by_id(body_id)
+        if not body:
+            return 0.0
+        mw = 0.0
+        if "ark" in site.buildings:
+            mw += 80.0  # colony ship reactors
+        if "solar_farm" in site.buildings:
+            lum = float(self.system.star.get("lum") or 1.0)
+            # Moons use parent heliocentric distance for insolation
+            if body.kind == "moon" and body.parent_id:
+                parent = self.system.body_by_id(body.parent_id)
+                a_m = parent.semi_major_m if parent else body.semi_major_m
+            else:
+                a_m = body.semi_major_m
+            a_au = max(a_m / AU_M, 0.05)
+            insolation = lum / (a_au * a_au)
+            # ~28 MW nameplate @ 1 AU Sol; outer / dim stars fall off hard
+            mw += 28.0 * min(max(insolation, 0.0), 4.0)
+        if "chem_genset" in site.buildings:
+            # Rated 30 MW only while fuel remains
+            if site.stockpile.get("chem_prop", 0.0) >= 0.25:
+                mw += 30.0
+        return mw
+
+    def mass_driver_online(self, body_id: str) -> bool:
+        """Mass driver present *and* site bus can supply its continuous draw."""
+        if not self._has_building(body_id, "mass_driver"):
+            return False
+        return self.site_power_mw(body_id) + 1e-9 >= MASS_DRIVER_POWER_MW
+
+    def _consume_mass_driver_power(self, body_id: str, amount_t: float) -> None:
+        """
+        Firing the rail draws the power bus. If chem genset is part of the supply
+        and solar alone is insufficient, burn a little chem_prop.
+        """
+        site = self.sites.get(body_id)
+        if not site:
+            return
+        solar_only = 0.0
+        # Recompute solar+ark without genset
+        body = self.system.body_by_id(body_id) if self.system else None
+        if body and "ark" in site.buildings:
+            solar_only += 80.0
+        if body and "solar_farm" in site.buildings:
+            lum = float(self.system.star.get("lum") or 1.0)
+            if body.kind == "moon" and body.parent_id:
+                parent = self.system.body_by_id(body.parent_id)
+                a_m = parent.semi_major_m if parent else body.semi_major_m
+            else:
+                a_m = body.semi_major_m
+            a_au = max(a_m / AU_M, 0.05)
+            insolation = lum / (a_au * a_au)
+            solar_only += 25.0 * min(max(insolation, 0.0), 5.0)
+        if solar_only + 1e-9 >= MASS_DRIVER_POWER_MW:
+            return  # pure electric shot
+        if "chem_genset" in site.buildings:
+            # ~0.08 t prop per tonne of payload (dirty bootstrap)
+            burn = max(0.3, 0.08 * amount_t)
+            have = site.stockpile.get("chem_prop", 0.0)
+            if have + 1e-9 < burn:
+                raise ValueError(
+                    f"chem genset needs {burn:.2f} t chem_prop for this shot; have {have:.1f}"
+                )
+            site.stockpile["chem_prop"] = have - burn
+
     def _heliocentric_radius_m(self, body_id: str) -> float:
         """Orbital radius about the star for travel planning (moons use parent planet)."""
         assert self.system
@@ -993,8 +1077,8 @@ class Game:
                 base = 420.0
             elif fb.kind != tb.kind:
                 base = 350.0
-            # Mass driver on the departure body: EM assist for bots/probes leaving surface
-            if fb and self._has_building(from_id, "mass_driver"):
+            # Powered mass driver: EM assist for bots/probes leaving surface
+            if fb and self.mass_driver_online(from_id):
                 base *= 0.25
             return base
 
@@ -1013,8 +1097,8 @@ class Game:
             cost = max(250.0, dv_h * 0.28)
         else:
             cost = max(300.0, dv_h * 0.35)
-        # Rail launch from a light body shaves the surface-lift share of the budget
-        if fb and self._has_building(from_id, "mass_driver"):
+        # Powered rail launch shaves the surface-lift share of the budget
+        if fb and self.mass_driver_online(from_id):
             assist = min(cost * 0.35, 800.0)
             cost = max(150.0, cost - assist)
         return cost
@@ -1608,11 +1692,18 @@ class Game:
             origin_body = self.system.body_by_id(origin_id)
         if origin_body and origin_body.kind in ("planet", "moon", "asteroid"):
             ascent = 0.45 * dv_surface_to_orbit(origin_body.mass_kg, origin_body.radius_m)
-            if self._has_building(origin_id, "mass_driver"):
-                notes.append("mass driver ascent (railgun — no chemical lift)")
+            if self.mass_driver_online(origin_id):
+                notes.append(
+                    f"mass driver ascent (rail + {self.site_power_mw(origin_id):.0f} MW — no chemical lift)"
+                )
                 # EM launch: negligible propellant; tiny residual for catch/rendezvous
                 extra += min(80.0, ascent * 0.05)
             else:
+                if self._has_building(origin_id, "mass_driver"):
+                    notes.append(
+                        f"mass driver unpowered ({self.site_power_mw(origin_id):.0f}/"
+                        f"{MASS_DRIVER_POWER_MW:.0f} MW) — chemical ascent"
+                    )
                 notes.append(f"chemical ascent ~{ascent:.0f} m/s")
                 extra += ascent
 
@@ -1634,8 +1725,9 @@ class Game:
             dopt = x.to_dict()
             if notes:
                 dopt["description"] = (dopt.get("description") or "") + " · " + "; ".join(notes)
-            dopt["mass_driver_ascent"] = bool(
-                origin_body and self._has_building(origin_id, "mass_driver")
+            dopt["mass_driver_ascent"] = self.mass_driver_online(origin_id) if origin_body else False
+            dopt["site_power_mw"] = (
+                round(self.site_power_mw(origin_id), 1) if origin_body else None
             )
             out.append(dopt)
         return out
@@ -1649,7 +1741,7 @@ class Game:
     ) -> dict:
         """
         Fire cargo off a mass-driver body without a hauler or chemical ascent.
-        Packet rides a Hohmann-class coast to dest (ark or body stockpile).
+        Requires site power ≥ MASS_DRIVER_POWER_MW. Packet coasts to dest.
         """
         self.catch_up()
         if self.phase != "system":
@@ -1663,6 +1755,12 @@ class Game:
             raise ValueError(f"no mass driver on {body.name} — build one first")
         if not self.body_allows_mass_driver(body):
             raise ValueError(f"{body.name} is too deep a well for mass-driver launch")
+        power = self.site_power_mw(origin_id)
+        if power + 1e-9 < MASS_DRIVER_POWER_MW:
+            raise ValueError(
+                f"mass driver needs ≥{MASS_DRIVER_POWER_MW:.0f} MW; "
+                f"{body.name} bus has {power:.1f} MW — build a solar farm or chem genset"
+            )
         if dest_id in ("ark_orbit",):
             dest_id = "ark"
         if origin_id == dest_id:
@@ -1674,7 +1772,10 @@ class Game:
                 f"insufficient {RESOURCE_NAMES.get(resource, resource)} "
                 f"(have {stock.get(resource, 0.0):.1f} t)"
             )
-        # Time of flight ≈ economy transfer (no propellant)
+        # Fuel the shot if genset is carrying the bus
+        self._consume_mass_driver_power(origin_id, amount_t)
+
+        # Time of flight ≈ economy transfer (no rocket propellant)
         from .orbits import hohmann_transfer
         from .constants import DAYS_PER_MONTH, SECONDS_PER_DAY
 
@@ -1707,8 +1808,8 @@ class Game:
         res_name = RESOURCE_NAMES.get(resource, resource)
         self._log(
             "haul",
-            f"Mass driver @ {body.name}: shot {amount_t:.1f} t {res_name} → {dest_label} "
-            f"({months:.1f} mo coast, 0 t chem_prop).",
+            f"Mass driver @ {body.name} ({power:.0f} MW): shot {amount_t:.1f} t {res_name} "
+            f"→ {dest_label} ({months:.1f} mo coast, electric launch).",
         )
         return self.snapshot()
 
@@ -2035,16 +2136,21 @@ class Game:
                 site = self.sites.get(b["id"])
                 full_body = self.system.body_by_id(b["id"])
                 b["mass_driver_ok"] = self.body_allows_mass_driver(full_body)
+                power = self.site_power_mw(b["id"])
+                b["site_power_mw"] = round(power, 1)
+                b["mass_driver_power_need_mw"] = MASS_DRIVER_POWER_MW
                 if site:
                     b["site_stockpile"] = {
                         k: round(v, 2) for k, v in site.stockpile.items() if v > 1e-6
                     }
                     b["site_buildings"] = list(site.buildings)
                     b["has_mass_driver"] = "mass_driver" in site.buildings
+                    b["mass_driver_online"] = self.mass_driver_online(b["id"])
                 else:
                     b["site_stockpile"] = {}
                     b["site_buildings"] = []
                     b["has_mass_driver"] = False
+                    b["mass_driver_online"] = False
         return data
 
 
