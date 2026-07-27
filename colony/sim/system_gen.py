@@ -49,6 +49,23 @@ STAR_PROPER_NAMES = [
 ]
 
 
+def format_tonnes(x: Optional[float]) -> Optional[str]:
+    """Human tonnage: 4.2×10⁶ t (not 16-digit floats)."""
+    if x is None:
+        return None
+    if x == 0:
+        return "0 t"
+    ax = abs(float(x))
+    exp = int(math.floor(math.log10(ax)))
+    mant = ax / (10**exp)
+    mant = round(mant, 1)
+    if mant >= 10.0:
+        mant = 1.0
+        exp += 1
+    sign = "-" if x < 0 else ""
+    return f"{sign}{mant:.1f}×10^{exp} t"
+
+
 # Survey detail climbs with on-station time. Common species earlier; rares later.
 # 0 hidden → 1 spectral hint → 2 detected → 3 graded → 4 site found (mineable)
 _SURVEY_RESOURCE_ORDER = [
@@ -98,12 +115,17 @@ class Deposit:
                 "detail": 1,
                 "hint": labels[1],
             }
+        amt = None
+        if self.detail >= 4:
+            amt = self.amount_t
+        elif self.detail >= 3:
+            # rough order-of-magnitude until site is located
+            amt = self.amount_t
         return {
             "resource": self.resource,
             "grade": round(self.grade, 2) if self.detail >= 3 else None,
-            "amount_t": round(self.amount_t, 1) if self.detail >= 4 else (
-                round(self.amount_t, -1) if self.detail >= 3 else None  # rough at 3
-            ),
+            "amount_t": amt,
+            "amount_display": format_tonnes(amt) if amt is not None else None,
             "known": True,
             "detail": self.detail,
             "hint": labels.get(self.detail, ""),
@@ -129,7 +151,8 @@ class MineSite:
             "body_id": self.body_id,
             "resource": self.resource,
             "grade": round(self.grade, 2),
-            "amount_t": round(self.amount_t, 1),
+            "amount_t": self.amount_t,
+            "amount_display": format_tonnes(self.amount_t),
             "name": self.name,
             "region": self.region,
             "mineable": True,
@@ -246,8 +269,8 @@ class Body:
                 elif dep.detail == 4:
                     site = next(s for s in self.mine_sites if s.resource == dep.resource)
                     notes.append(
-                        f"suitable {dep.resource} site found: {site.region} "
-                        f"(mine '{site.name}' now available)"
+                        f"suitable {dep.resource} extraction site: {site.region} "
+                        f"({format_tonnes(site.amount_t)} available to claim)"
                     )
         return notes
 

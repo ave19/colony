@@ -274,7 +274,7 @@ UNIT_BUILDS = {
         "cost": {"steel": 8.0, "chip": 4.0, "panel": 2.0, "Al": 3.0},
         "months": 1.5,
         "capabilities": ["survey"],
-        "description": "Remote sensors and mapping suite. Built on-station from seed stock.",
+        "description": "Remote sensors to find suitable extraction sites. Built on-station from seed stock.",
     },
     "miner": {
         "id": "miner",

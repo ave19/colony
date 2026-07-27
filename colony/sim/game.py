@@ -621,16 +621,16 @@ class Game:
                 u.months_left = 0.0
                 self._log(
                     "order",
-                    f"{u.name} begins survey of {body.name}. "
-                    f"Stays until recalled; mine sites appear only after enough detail.",
+                    f"{u.name} begins search for extraction sites on {body.name}. "
+                    f"Stays until recalled; a mineable site appears only after enough detail.",
                 )
             else:
                 u.status = "en_route"
                 u.months_left = travel
                 self._log(
                     "order",
-                    f"{u.name} → {body.name} for survey: {travel:.1f} mo transit, "
-                    f"then continuous mapping until recalled.",
+                    f"{u.name} → {body.name} to find extraction sites: {travel:.1f} mo transit, "
+                    f"then continuous survey until recalled.",
                 )
             return self.snapshot()
 

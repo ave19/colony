@@ -8,6 +8,41 @@ let map = null;
 
 const $ = (id) => document.getElementById(id);
 
+/** 4.2×10⁶ t — not 16 digits of false precision */
+function formatTons(x) {
+  if (x == null || x === "") return null;
+  if (typeof x === "string" && x.includes("10")) return x; // already formatted
+  const n = Number(x);
+  if (!Number.isFinite(n) || n === 0) return "0 t";
+  const ax = Math.abs(n);
+  let exp = Math.floor(Math.log10(ax));
+  let mant = ax / Math.pow(10, exp);
+  mant = Math.round(mant * 10) / 10;
+  if (mant >= 10) {
+    mant = 1.0;
+    exp += 1;
+  }
+  const sign = n < 0 ? "-" : "";
+  return `${sign}${mant.toFixed(1)}×10${expToSuperscript(exp)} t`;
+}
+
+function expToSuperscript(exp) {
+  const map = {
+    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "-": "⁻",
+  };
+  return String(exp)
+    .split("")
+    .map((c) => map[c] || c)
+    .join("");
+}
+
+function tonsLabel(d) {
+  if (d && d.amount_display) return d.amount_display.replace("10^", "10").replace(/10\^(-?\d+)/, (_, e) => "10" + expToSuperscript(e));
+  if (d && d.amount_t != null) return formatTons(d.amount_t);
+  return null;
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -250,14 +285,18 @@ function renderBodyPanel() {
       if (d.detail <= 0) return null;
       if (d.detail === 1) return `· ${d.resource_hint || "anomaly"} (${d.hint})`;
       let s = `· ${d.resource} (${d.hint})`;
-      if (d.grade != null) s += ` g${d.grade}`;
-      if (d.amount_t != null) s += ` ~${Math.round(d.amount_t)}t`;
+      if (d.grade != null) s += ` · grade ${d.grade}`;
+      const tons = tonsLabel(d);
+      if (tons) s += ` · ${tons}`;
       return s;
     })
     .filter(Boolean)
     .join("<br/>");
   const sites = (b.mine_sites || [])
-    .map((s) => `· ${s.name} — ${s.resource}`)
+    .map((s) => {
+      const tons = tonsLabel(s) || formatTons(s.amount_t);
+      return `· <strong>${s.resource}</strong> @ ${s.region} · grade ${s.grade}${tons ? " · " + tons : ""}`;
+    })
     .join("<br/>");
 
   let orbitFact = "";
@@ -278,11 +317,11 @@ function renderBodyPanel() {
     <h2>Facts</h2>
     ${orbitFact}
     <p><strong>Δv</strong> ↑orbit ${b.dv_to_orbit_m_s} · esc ${b.dv_escape_from_orbit_m_s} m/s</p>
-    <p><strong>Survey</strong> ${sm.toFixed(1)} mo on station</p>
+    <p><strong>Site search</strong> ${sm.toFixed(1)} mo on station</p>
     <h2>Intel</h2>
     <p>${depLines || '<span class="muted">No composition intel yet</span>'}</p>
-    <h2>Mine sites</h2>
-    <p>${sites || '<span class="muted">None — keep surveying</span>'}</p>
+    <h2>Extraction sites</h2>
+    <p>${sites || '<span class="muted">None yet — keep searching</span>'}</p>
   `;
   const fb = $("btn-focus-body");
   if (fb) fb.onclick = () => map && map.focusBody(b.id);
@@ -332,21 +371,22 @@ async function renderOrders() {
   html += btn(
     "survey",
     surveyingHere
-      ? `Surveying… ${((b.survey_months || 0).toFixed(1))} mo — warp for detail`
-      : `Survey ${b.name}${fmt(estSurvey)}`,
+      ? `Searching for extraction sites… ${(b.survey_months || 0).toFixed(1)} mo (warp for progress)`
+      : `Find suitable extraction site${fmt(estSurvey)}`,
     b.id,
     caps.includes("survey") && !surveyingHere && !(busy && u.order !== "survey")
   );
   html += btn("idle", "Stand by / recall", b.id, true);
 
-  html += `<h2>Mine sites</h2>`;
+  html += `<h2>Extraction sites</h2>`;
   if (!sites.length) {
-    html += `<p class="muted">No sites yet — survey longer.</p>`;
+    html += `<p class="muted">None yet — order a survey sat to find one.</p>`;
   } else {
     for (const s of sites) {
+      const tons = tonsLabel(s) || formatTons(s.amount_t);
       html += btn(
         "mine",
-        `Mine ${s.resource} @ ${s.region}`,
+        `Extract ${s.resource} @ ${s.region}${tons ? " · " + tons : ""}`,
         s.id,
         caps.includes("mine") && !busy
       );
