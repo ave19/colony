@@ -227,7 +227,14 @@ class Game:
                 self._complete_haul(h)
 
         for u in list(self.fleet.values()):
-            if u.status in ("en_route", "working") and u.months_left > 0:
+            if u.status == "en_route" and u.months_left > 0:
+                u.months_left -= months
+                if u.months_left <= 0:
+                    self._complete_unit_order(u)
+            elif u.status == "working" and u.order == "survey":
+                # Continuous survey: learn more the longer you sit
+                self._tick_survey(u, months)
+            elif u.status == "working" and u.order == "mine" and u.months_left > 0:
                 u.months_left -= months
                 if u.months_left <= 0:
                     self._complete_unit_order(u)
@@ -246,8 +253,13 @@ class Game:
             if h.status == "in_flight" and h.months_left > 0:
                 targets.append(h.months_left)
         for u in self.fleet.values():
-            if u.months_left > 0 and u.status in ("en_route", "working"):
+            if u.status == "en_route" and u.months_left > 0:
                 targets.append(u.months_left)
+            elif u.status == "working" and u.order == "mine" and u.months_left > 0:
+                targets.append(u.months_left)
+            elif u.status == "working" and u.order == "survey":
+                # Warp survey in 1-month slices so discoveries surface gradually
+                targets.append(1.0)
         if not targets:
             # Small nudge: 1 week of game time (not a full month of chaos)
             self.advance(SECONDS_PER_DAY * 7)
@@ -402,34 +414,70 @@ class Game:
             return {"months": 0, "travel_months": 0, "work_months": 0}
         work = 0.0
         if order == "survey":
-            work = 0.75  # multi-week survey campaign, not a snapshot
+            # Transit only — survey continues until recalled (no one-shot dump)
+            work = 0.0
         elif order == "mine":
-            work = 1.0
+            work = 1.5  # shift once a site exists
         elif order == "move":
             work = 0.0
         elif order == "idle":
             return {"months": 0, "travel_months": 0, "work_months": 0}
-        travel = self._travel_months(u.location_id, target_id, u.kind) if target_id else 0.0
+        # target_id for mine may be a mine_site id
+        dest_body = target_id
+        if order == "mine" and self.system:
+            site = self._find_mine_site(target_id)
+            if site:
+                dest_body = site.body_id
+        travel = self._travel_months(u.location_id, dest_body, u.kind) if dest_body else 0.0
         if order == "idle":
             travel = 0.0
+        note = ""
+        if order == "survey":
+            note = "Then stays on station; detail improves over months until you recall it."
         return {
             "months": round(travel + work, 2),
             "travel_months": round(travel, 2),
             "work_months": round(work, 2),
             "years": round((travel + work) / 12.0, 2),
+            "note": note,
         }
+
+    def _find_mine_site(self, site_id: str):
+        if not self.system:
+            return None
+        for b in self.system.bodies:
+            for s in b.mine_sites:
+                if s.id == site_id:
+                    return s
+        return None
+
+    def _tick_survey(self, u: FleetUnit, months: float) -> None:
+        assert self.system
+        body = self.system.body_by_id(u.location_id)
+        if not body:
+            return
+        notes = body.apply_survey_time(months)
+        self.scanned.add(body.id)
+        if notes:
+            self._log("scan", f"{u.name} @ {body.name} ({body.survey_months:.1f} mo): " + "; ".join(notes))
 
     def issue_order(self, unit_id: str, order: str, target_id: str = "") -> dict:
         """
-        Apply a unit's capability to a target: survey | mine | move | build_base prep.
-        Pattern: select unit → select body → order.
+        Apply a unit's capability to a target: survey | mine | move.
+        Survey: go there and stay — knowledge deepens with time; mine sites unlock.
+        Mine: requires a *found* mine site (not the whole planet).
         """
         self.catch_up()
         u = self.fleet.get(unit_id)
         if not u:
             raise ValueError("unknown unit")
-        if u.status in ("en_route", "working") and u.months_left > 0:
-            raise ValueError(f"{u.name} is busy ({u.status})")
+        # Busy if en_route with time left, or mining shift, or surveying (must idle first)
+        if u.status == "en_route" and u.months_left > 0:
+            raise ValueError(f"{u.name} is en route")
+        if u.status == "working" and u.order == "mine" and u.months_left > 0:
+            raise ValueError(f"{u.name} is mining")
+        if u.status == "working" and u.order == "survey" and order != "idle":
+            raise ValueError(f"{u.name} is surveying — stand by (idle) to reassign")
         assert self.system
 
         if order == "idle":
@@ -446,36 +494,49 @@ class Game:
             body = self.system.body_by_id(target_id)
             if not body:
                 raise ValueError("pick a body to survey")
-            est = self.estimate_order(unit_id, "survey", target_id)
+            travel = self._travel_months(u.location_id, target_id, u.kind)
             u.order = "survey"
             u.target_id = target_id
-            u.status = "en_route"
-            u.months_left = est["months"]
-            self._log(
-                "order",
-                f"{u.name} → survey {body.name}: "
-                f"{est['travel_months']:.1f} mo transit + {est['work_months']:.1f} mo survey "
-                f"(~{est['years']:.2f} y). Warp to resolve.",
-            )
+            if travel <= 0.3 and u.location_id == target_id:
+                # Already on station — start surveying immediately
+                u.status = "working"
+                u.months_left = 0.0
+                self._log(
+                    "order",
+                    f"{u.name} begins survey of {body.name}. "
+                    f"Stays until recalled; mine sites appear only after enough detail.",
+                )
+            else:
+                u.status = "en_route"
+                u.months_left = travel
+                self._log(
+                    "order",
+                    f"{u.name} → {body.name} for survey: {travel:.1f} mo transit, "
+                    f"then continuous mapping until recalled.",
+                )
             return self.snapshot()
 
         if order == "mine":
             if CAP_MINE not in u.capabilities:
                 raise ValueError("unit cannot mine")
-            body = self.system.body_by_id(target_id)
-            if not body:
-                raise ValueError("pick a body to mine")
-            if target_id not in self.scanned and not any(d.known for d in body.deposits):
-                raise ValueError("survey this body before mining")
-            est = self.estimate_order(unit_id, "mine", target_id)
+            # target_id must be a mine_site id (unlocked by survey)
+            msite = self._find_mine_site(target_id)
+            if not msite:
+                raise ValueError(
+                    "no mine site selected — survey until a suitable location is found, "
+                    "then mine that site (not the whole world)"
+                )
+            body = self.system.body_by_id(msite.body_id)
+            travel = self._travel_months(u.location_id, msite.body_id, u.kind)
+            work = 1.5
             u.order = "mine"
-            u.target_id = target_id
+            u.target_id = msite.id  # site id
             u.status = "en_route"
-            u.months_left = est["months"]
+            u.months_left = travel + work
             self._log(
                 "order",
-                f"{u.name} → mine {body.name}: {est['travel_months']:.1f} mo transit "
-                f"+ {est['work_months']:.1f} mo shift (~{est['years']:.2f} y).",
+                f"{u.name} → mine {msite.name} on {body.name if body else msite.body_id}: "
+                f"{travel:.1f} mo transit + {work:.1f} mo shift.",
             )
             return self.snapshot()
 
@@ -483,11 +544,11 @@ class Game:
             body = self.system.body_by_id(target_id)
             if not body:
                 raise ValueError("pick a destination")
-            est = self.estimate_order(unit_id, "move", target_id)
+            travel = self._travel_months(u.location_id, target_id, u.kind)
             u.order = "move"
             u.target_id = target_id
             u.status = "en_route"
-            u.months_left = max(0.75, est["months"])
+            u.months_left = max(0.75, travel)
             self._log(
                 "order",
                 f"{u.name} → {body.name}: {u.months_left:.1f} mo transit (~{u.months_left/12:.2f} y).",
@@ -509,34 +570,48 @@ class Game:
             return
 
         if u.order == "survey":
+            # Arrived on station — begin continuous survey (does not dump full map)
             u.location_id = u.target_id
             body = self.system.body_by_id(u.target_id)
-            if body:
-                for d in body.deposits:
-                    d.known = True
-                self.scanned.add(body.id)
-                self._log("scan", f"{u.name} surveyed {body.name}. Deposits known.")
-            u.status = "idle"
-            u.order = ""
-            u.target_id = ""
+            u.status = "working"
             u.months_left = 0.0
+            self._log(
+                "scan",
+                f"{u.name} on station at {body.name if body else u.target_id}. "
+                f"Surveying… knowledge will grow over time. Recall with Stand by.",
+            )
+            # Small initial pass so warp immediately can show first hints
+            if body:
+                notes = body.apply_survey_time(0.25)
+                self.scanned.add(body.id)
+                if notes:
+                    self._log("scan", f"{u.name}: " + "; ".join(notes))
             return
 
         if u.order == "mine":
-            u.location_id = u.target_id
-            body = self.system.body_by_id(u.target_id)
-            site = self.sites.setdefault(u.target_id, Site(body_id=u.target_id))
-            if "extractor" not in site.buildings:
-                site.buildings.append("extractor")  # bot sets up a rudimentary dig
-            extracted = 0.0
+            msite = self._find_mine_site(u.target_id)
+            if not msite:
+                u.status = "idle"
+                u.order = ""
+                u.months_left = 0.0
+                self._log("mine", f"{u.name}: mine site gone.")
+                return
+            u.location_id = msite.body_id
+            body = self.system.body_by_id(msite.body_id)
+            site = self.sites.setdefault(msite.body_id, Site(body_id=msite.body_id))
+            took = min(msite.amount_t, 50.0 * msite.grade)
+            msite.amount_t -= took
+            # also draw down body deposit pool
             if body:
                 for dep in body.deposits:
-                    if dep.known and dep.amount_t > 0:
-                        took = min(dep.amount_t, 40.0 * dep.grade)
-                        dep.amount_t -= took
-                        site.stockpile[dep.resource] = site.stockpile.get(dep.resource, 0.0) + took
-                        extracted += took
-            self._log("mine", f"{u.name} mined at {body.name if body else u.target_id}: {extracted:.0f} t to site stockpile.")
+                    if dep.resource == msite.resource:
+                        dep.amount_t = max(0.0, dep.amount_t - took)
+            site.stockpile[msite.resource] = site.stockpile.get(msite.resource, 0.0) + took
+            self._log(
+                "mine",
+                f"{u.name} extracted {took:.0f} t {msite.resource} at {msite.name} "
+                f"({msite.region}). Site remaining ~{msite.amount_t:.0f} t.",
+            )
             u.status = "idle"
             u.order = ""
             u.target_id = ""

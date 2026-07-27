@@ -49,22 +49,117 @@ STAR_PROPER_NAMES = [
 ]
 
 
+# Survey detail climbs with on-station time. Common species earlier; rares later.
+# 0 hidden → 1 spectral hint → 2 detected → 3 graded → 4 site found (mineable)
+_SURVEY_RESOURCE_ORDER = [
+    "Fe", "Si", "Al", "H2O", "CH4", "N", "Cu", "Li", "Ar", "He", "U", "Xe", "MAG",
+]
+
+_SITE_REGION = [
+    "highland plateau", "rift basin", "crater floor", "polar scarp",
+    "mare plain", "canyon wall", "regolith apron", "volcanic massif",
+    "ice shelf", "subsurface lens", "ring of hills", "ancient seabed",
+]
+
+
 @dataclass
 class Deposit:
     resource: str
     grade: float
     amount_t: float
     known: bool = False
+    detail: int = 0  # 0..4
 
     def to_dict(self) -> dict:
-        if not self.known:
-            return {"resource": "?", "grade": None, "amount_t": None, "known": False, "hint": "unsurveyed"}
+        labels = {
+            0: "unsurveyed",
+            1: "spectral hint",
+            2: "detected",
+            3: "graded",
+            4: "site located",
+        }
+        if self.detail <= 0:
+            return {
+                "resource": "?",
+                "grade": None,
+                "amount_t": None,
+                "known": False,
+                "detail": 0,
+                "hint": labels[0],
+            }
+        # detail 1: only a vague class, not always the element name
+        if self.detail == 1:
+            return {
+                "resource": "?",
+                "resource_hint": _resource_hint(self.resource),
+                "grade": None,
+                "amount_t": None,
+                "known": False,
+                "detail": 1,
+                "hint": labels[1],
+            }
         return {
+            "resource": self.resource,
+            "grade": round(self.grade, 2) if self.detail >= 3 else None,
+            "amount_t": round(self.amount_t, 1) if self.detail >= 4 else (
+                round(self.amount_t, -1) if self.detail >= 3 else None  # rough at 3
+            ),
+            "known": True,
+            "detail": self.detail,
+            "hint": labels.get(self.detail, ""),
+            "mineable": self.detail >= 4,
+        }
+
+
+@dataclass
+class MineSite:
+    """A surveyed place where a mine/scoop for one resource can be ordered."""
+    id: str
+    body_id: str
+    resource: str
+    grade: float
+    amount_t: float
+    name: str
+    region: str
+    detail: int = 4  # always site-level when created
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "body_id": self.body_id,
             "resource": self.resource,
             "grade": round(self.grade, 2),
             "amount_t": round(self.amount_t, 1),
-            "known": True,
+            "name": self.name,
+            "region": self.region,
+            "mineable": True,
         }
+
+
+def _resource_hint(resource: str) -> str:
+    hints = {
+        "Fe": "ferromagnetic crust signatures",
+        "Si": "silicate-rich regolith",
+        "Al": "light-metal oxides",
+        "H2O": "hydrogen-bearing ice / hydrated minerals",
+        "CH4": "organic / methane absorptions",
+        "N": "nitrogen compounds",
+        "Cu": "conductive metal traces",
+        "Li": "light alkali signatures",
+        "Ar": "noble gas enrichment",
+        "He": "light noble gas",
+        "U": "radioisotope anomaly",
+        "Xe": "heavy noble gas",
+        "MAG": "rare magnetic-alloy precursors",
+    }
+    return hints.get(resource, "composition anomaly")
+
+
+def _resource_rank(resource: str) -> int:
+    try:
+        return _SURVEY_RESOURCE_ORDER.index(resource)
+    except ValueError:
+        return 50
 
 
 @dataclass
@@ -80,13 +175,81 @@ class Body:
     has_atmosphere: bool = False
     atmosphere_note: str = ""
     deposits: List[Deposit] = field(default_factory=list)
+    mine_sites: List[MineSite] = field(default_factory=list)
     density_hint: str = "unknown"
     ice_likely: bool = False
     metal_likely: bool = False
     planet_class: str = ""  # rocky | gas_giant | ice_giant | dwarf
+    survey_months: float = 0.0  # cumulative on-station survey time
 
     def mu(self) -> float:
         return G * self.mass_kg
+
+    def apply_survey_time(self, months: float, rng: Optional[random.Random] = None) -> List[str]:
+        """
+        Longer on-station survey → finer detail.
+        Only after a *site* is located (detail 4) can you order a mine there.
+        """
+        if months <= 0:
+            return []
+        rng = rng or random.Random(hash((self.id, int(self.survey_months * 100))) & 0xFFFFFFFF)
+        before = {d.resource: d.detail for d in self.deposits}
+        sites_before = {s.resource for s in self.mine_sites}
+        self.survey_months += months
+        sm = self.survey_months
+
+        for dep in sorted(self.deposits, key=lambda d: _resource_rank(d.resource)):
+            r = _resource_rank(dep.resource)
+            # Months on station thresholds (common resources sooner)
+            t1 = 0.5 + r * 0.45  # spectral hint
+            t2 = t1 + 1.0  # confirmed detection
+            t3 = t2 + 1.2  # grade
+            t4 = t3 + 1.8 + r * 0.25  # find a place you can actually mine
+            if sm >= t1 and dep.detail < 1:
+                dep.detail = 1
+            if sm >= t2 and dep.detail < 2:
+                dep.detail = 2
+                dep.known = True
+            if sm >= t3 and dep.detail < 3:
+                dep.detail = 3
+                dep.known = True
+            if sm >= t4 and dep.detail < 4:
+                dep.detail = 4
+                dep.known = True
+                if dep.resource not in sites_before and not any(
+                    s.resource == dep.resource for s in self.mine_sites
+                ):
+                    region = rng.choice(_SITE_REGION)
+                    site_id = f"{self.id}_{dep.resource}_site"
+                    self.mine_sites.append(
+                        MineSite(
+                            id=site_id,
+                            body_id=self.id,
+                            resource=dep.resource,
+                            grade=dep.grade,
+                            amount_t=dep.amount_t * rng.uniform(0.15, 0.45),  # this site, not whole body
+                            name=f"{dep.resource} mine — {region}",
+                            region=region,
+                        )
+                    )
+
+        notes: List[str] = []
+        for dep in self.deposits:
+            old = before.get(dep.resource, 0)
+            if dep.detail > old:
+                if dep.detail == 1:
+                    notes.append(f"spectral hint: {_resource_hint(dep.resource)}")
+                elif dep.detail == 2:
+                    notes.append(f"confirmed {dep.resource} present")
+                elif dep.detail == 3:
+                    notes.append(f"graded {dep.resource} (≈{dep.grade:.2f})")
+                elif dep.detail == 4:
+                    site = next(s for s in self.mine_sites if s.resource == dep.resource)
+                    notes.append(
+                        f"suitable {dep.resource} site found: {site.region} "
+                        f"(mine '{site.name}' now available)"
+                    )
+        return notes
 
 
 @dataclass
@@ -205,7 +368,9 @@ class StarSystem:
             "density_hint": b.density_hint,
             "ice_likely": b.ice_likely,
             "metal_likely": b.metal_likely,
+            "survey_months": round(b.survey_months, 2),
             "deposits": [d.to_dict() for d in b.deposits],
+            "mine_sites": [s.to_dict() for s in b.mine_sites],
             "period_days": round(period_days, 2),
             "period_years": round(period_years, 3) if b.kind != "moon" else None,
             "period_label": (
