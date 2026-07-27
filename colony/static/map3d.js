@@ -1,11 +1,11 @@
 /**
  * Simple Three.js system map: orbit / zoom / pan, focus planet to see moons.
- * Distances use a dual scale: heliocentric √AU, local moon rings exaggerated when focused.
+ * Distances use a dual scale: heliocentric sqrt(AU), local moon rings exaggerated when focused.
  */
 import * as THREE from "/static/vendor/three/three.module.js";
 import { OrbitControls } from "/static/vendor/three/addons/controls/OrbitControls.js";
 
-const AU_SCALE = 12; // scene units per √AU at system scale
+const AU_SCALE = 12; // scene units per sqrt(AU) at system scale
 
 export class SystemMap3D {
   constructor(canvas) {
@@ -92,7 +92,7 @@ export class SystemMap3D {
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    const mat = new THREE.PointsMaterial({ color: 0x reg, size: 0.35, sizeAttenuation: true });
+    const mat = new THREE.PointsMaterial({ color: 0x8899aa, size: 0.35, sizeAttenuation: true });
     this.scene.add(new THREE.Points(geo, mat));
   }
 
