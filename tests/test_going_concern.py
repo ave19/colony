@@ -403,16 +403,15 @@ def test_survey_probe_has_dv_budget_and_return_ark_refuels():
         g.warp_to_next_event(force=True)
     assert sat.location_id == dest.id
 
-    # Drain tanks artificially then return home
-    sat.dv_remaining_m_s = min(sat.dv_remaining_m_s, 50.0)
-    # May not afford long return — top up just enough for test path
-    need = g._travel_dv_m_s(sat.location_id, g.home_body_id, "survey")
+    # Drain tanks artificially then return to ark dock
+    need = g._travel_dv_m_s(sat.location_id, "ark", "survey")
     sat.dv_remaining_m_s = need + 10
     g.issue_order(sat.id, "return_ark")
     assert sat.order == "return_ark"
+    assert sat.target_id == "ark"
     while sat.status == "en_route":
         g.warp_to_next_event(force=True)
-    assert sat.location_id == g.home_body_id
+    assert sat.location_id == "ark"
     assert sat.dv_remaining_m_s == sat.dv_capacity_m_s  # refilled
 
 
