@@ -6,6 +6,8 @@ Humanity is spreading among the stars. A colony ship arrives at a generated syst
 
 Design and milestones: [docs/PLAYABLE_LADDER.md](docs/PLAYABLE_LADDER.md)
 
+Tech / materials book: [docs/TECH_BOOK_v1.md](docs/TECH_BOOK_v1.md)
+
 - **A** — Solo vertical slice (first playable)
 - **B** — Multiplayer corps
 - **C** — Director AI

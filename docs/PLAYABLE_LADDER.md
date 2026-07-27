@@ -118,3 +118,9 @@ With a token that has **Issues: Read and write** on this repo:
 
 - Sync code to `origin` regularly during implementation.
 - Science homework for the tech book (A10) runs in parallel with engineering.
+
+---
+
+## Tech book
+
+Detailed v1 materials/tech graph: [TECH_BOOK_v1.md](./TECH_BOOK_v1.md)
