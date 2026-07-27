@@ -138,6 +138,7 @@ class FleetUnit:
     status: str = "idle"  # idle | en_route | working
     order: str = ""
     target_id: str = ""
+    search_resource: str = ""  # directed survey: "Fe", "H2O", …
     months_left: float = 0.0
     capabilities: List[str] = field(default_factory=list)
 
@@ -150,6 +151,7 @@ class FleetUnit:
             "status": self.status,
             "order": self.order,
             "target_id": self.target_id,
+            "search_resource": self.search_resource,
             "months_left": round(self.months_left, 2),
             "capabilities": self.capabilities,
         }
@@ -574,16 +576,24 @@ class Game:
         body = self.system.body_by_id(u.location_id)
         if not body:
             return
-        notes = body.apply_survey_time(months)
+        focus = u.search_resource or None
+        notes = body.apply_survey_time(months, focus_resource=focus)
         self.scanned.add(body.id)
         if notes:
-            self._log("scan", f"{u.name} @ {body.name} ({body.survey_months:.1f} mo): " + "; ".join(notes))
+            label = f"seeking {focus}" if focus else "broad survey"
+            seek_t = body.seek_months.get(focus, body.survey_months) if focus else body.survey_months
+            self._log(
+                "scan",
+                f"{u.name} @ {body.name} ({label}, {seek_t:.1f} mo): " + "; ".join(notes),
+            )
 
-    def issue_order(self, unit_id: str, order: str, target_id: str = "") -> dict:
+    def issue_order(
+        self, unit_id: str, order: str, target_id: str = "", resource: str = ""
+    ) -> dict:
         """
         Apply a unit's capability to a target: survey | mine | move.
-        Survey: go there and stay — knowledge deepens with time; mine sites unlock.
-        Mine: requires a *found* mine site (not the whole planet).
+        Survey with resource="Fe" means "find sources of iron" on that body.
+        Mine requires a found extraction site.
         """
         self.catch_up()
         u = self.fleet.get(unit_id)
@@ -602,6 +612,7 @@ class Game:
             u.status = "idle"
             u.order = ""
             u.target_id = ""
+            u.search_resource = ""
             u.months_left = 0.0
             self._log("order", f"{u.name}: standing by.")
             return self.snapshot()
@@ -612,25 +623,34 @@ class Game:
             body = self.system.body_by_id(target_id)
             if not body:
                 raise ValueError("pick a body to survey")
+            res = (resource or "").strip()
+            # Optional: must be a plausible search target for this body
+            from .system_gen import _searchable_resources
+
+            allowed = _searchable_resources(body)
+            if res and res not in allowed:
+                # still allow if deposit exists (player may have prior intel)
+                if not any(d.resource == res for d in body.deposits):
+                    raise ValueError(f"not a useful search target here: {res}")
             travel = self._travel_months(u.location_id, target_id, u.kind)
             u.order = "survey"
             u.target_id = target_id
+            u.search_resource = res
+            goal = f"sources of {RESOURCE_NAMES.get(res, res)}" if res else "broad composition"
             if travel <= 0.3 and u.location_id == target_id:
-                # Already on station — start surveying immediately
                 u.status = "working"
                 u.months_left = 0.0
                 self._log(
                     "order",
-                    f"{u.name} begins search for extraction sites on {body.name}. "
-                    f"Stays until recalled; a mineable site appears only after enough detail.",
+                    f"{u.name} begins search for {goal} on {body.name}. "
+                    f"Stays until recalled.",
                 )
             else:
                 u.status = "en_route"
                 u.months_left = travel
                 self._log(
                     "order",
-                    f"{u.name} → {body.name} to find extraction sites: {travel:.1f} mo transit, "
-                    f"then continuous survey until recalled.",
+                    f"{u.name} → {body.name} to find {goal}: {travel:.1f} mo transit.",
                 )
             return self.snapshot()
 
@@ -688,19 +708,23 @@ class Game:
             return
 
         if u.order == "survey":
-            # Arrived on station — begin continuous survey (does not dump full map)
+            # Arrived on station — begin continuous directed/broad survey
             u.location_id = u.target_id
             body = self.system.body_by_id(u.target_id)
             u.status = "working"
             u.months_left = 0.0
+            goal = (
+                f"sources of {RESOURCE_NAMES.get(u.search_resource, u.search_resource)}"
+                if u.search_resource
+                else "broad composition"
+            )
             self._log(
                 "scan",
-                f"{u.name} on station at {body.name if body else u.target_id}. "
-                f"Surveying… knowledge will grow over time. Recall with Stand by.",
+                f"{u.name} on station at {body.name if body else u.target_id}, "
+                f"searching for {goal}. Recall with Stand by.",
             )
-            # Small initial pass so warp immediately can show first hints
             if body:
-                notes = body.apply_survey_time(0.25)
+                notes = body.apply_survey_time(0.25, focus_resource=u.search_resource or None)
                 self.scanned.add(body.id)
                 if notes:
                     self._log("scan", f"{u.name}: " + "; ".join(notes))

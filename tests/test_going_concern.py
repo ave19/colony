@@ -82,22 +82,43 @@ def test_queue_build_survey_then_order_survey_unlocks_site():
     assert len(surveys) == 1
     sat = surveys[0]
 
-    body = next(b for b in g.system.bodies if b.kind == "planet" and b.deposits)
-    # Park sat already at body to isolate survey progression (travel is separate)
+    body = next(b for b in g.system.bodies if b.kind == "planet" and any(d.resource == "Fe" for d in b.deposits))
+    # Directed search: find sources of iron
     sat.location_id = body.id
-    g.issue_order(sat.id, "survey", body.id)
+    g.issue_order(sat.id, "survey", body.id, resource="Fe")
     assert sat.status == "working"
     assert sat.order == "survey"
+    assert sat.search_resource == "Fe"
 
-    # Advance survey months until a mine site appears
     found = False
     for _ in range(80):
-        g.advance(SECONDS_PER_DAY * 30)  # ~1 month slices
-        if body.mine_sites:
+        g.advance(SECONDS_PER_DAY * 30)
+        if any(s.resource == "Fe" for s in body.mine_sites):
             found = True
             break
-    assert found, "survey on-station should eventually unlock a mine site"
-    assert body.survey_months > 0
+    assert found, "directed Fe search should unlock an iron extraction site"
+    assert body.seek_months.get("Fe", 0) > 0
+
+
+def test_directed_search_can_exhaust_missing_resource():
+    g = Game(universe_seed=33)
+    g.open_survey_archive()
+    g.select_star(g.catalog[0]["seed"])
+    while g.phase == "transit":
+        g.warp_to_next_event()
+    g.queue_build("survey")
+    for _ in range(20):
+        if any(u.kind == "survey" for u in g.fleet.values()):
+            break
+        g.warp_to_next_event()
+    sat = next(u for u in g.fleet.values() if u.kind == "survey")
+    # Gas giant: no Fe deposit — search should conclude none
+    body = next(b for b in g.system.bodies if b.planet_class == "gas_giant")
+    sat.location_id = body.id
+    g.issue_order(sat.id, "survey", body.id, resource="Fe")
+    for _ in range(10):
+        g.advance(SECONDS_PER_DAY * 30)
+    assert "Fe" in body.seek_exhausted
 
 
 def test_cannot_commit_unknown_seed():

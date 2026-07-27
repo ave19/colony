@@ -276,6 +276,10 @@ function renderFleet() {
       render();
     };
   });
+  // Default to ark on arrival so fabrication bay is discoverable
+  if (!selectedUnitId && fleet.some((u) => u.kind === "ark")) {
+    selectedUnitId = "ark";
+  }
 }
 
 function renderUnitPanel() {
@@ -378,17 +382,16 @@ async function renderOrders() {
     (u.status === "working" && u.order === "survey");
   const sites = b.mine_sites || [];
   const surveyingHere = u.status === "working" && u.order === "survey" && u.location_id === b.id;
+  const resNames = (state.tech && state.tech.resources) || {};
+  const searchable = b.searchable_resources || ["Fe", "Si", "Al", "H2O"];
+  const exhausted = new Set(b.seek_exhausted || []);
+  const foundRes = new Set((b.mine_sites || []).map((s) => s.resource));
 
   let estMove = null;
-  let estSurvey = null;
   try {
     estMove = await api("/api/estimate_order", {
       method: "POST",
       body: JSON.stringify({ unit_id: u.id, order: "move", target_id: b.id }),
-    });
-    estSurvey = await api("/api/estimate_order", {
-      method: "POST",
-      body: JSON.stringify({ unit_id: u.id, order: "survey", target_id: b.id }),
     });
   } catch (_) {}
 
@@ -400,35 +403,65 @@ async function renderOrders() {
   };
 
   let html = "";
-  html += btn("move", `Move to ${b.name}${fmt(estMove)}`, b.id, !busy);
-  html += btn(
-    "survey",
-    surveyingHere
-      ? `Searching for extraction sites… ${(b.survey_months || 0).toFixed(1)} mo (warp for progress)`
-      : `Find suitable extraction site${fmt(estSurvey)}`,
-    b.id,
-    caps.includes("survey") && !surveyingHere && !(busy && u.order !== "survey")
-  );
-  html += btn("idle", "Stand by / recall", b.id, true);
+  html += btn("move", `Move to ${b.name}${fmt(estMove)}`, b.id, "", !busy);
+  html += btn("idle", "Stand by / recall", b.id, "", true);
+
+  if (caps.includes("survey")) {
+    html += `<h2>Search for sources</h2>`;
+    if (surveyingHere) {
+      const what = u.search_resource
+        ? resNames[u.search_resource] || u.search_resource
+        : "broad composition";
+      const sm = u.search_resource
+        ? (b.seek_months && b.seek_months[u.search_resource]) || 0
+        : b.survey_months || 0;
+      html += `<div class="queue-job">
+        <div class="title">Searching: ${what}</div>
+        <div class="meta">${sm.toFixed(1)} mo on station · warp to advance · stand by to reassign</div>
+      </div>`;
+    } else {
+      html += `<p class="muted">Choose what to look for on ${b.name}:</p>`;
+      for (const res of searchable) {
+        const name = resNames[res] || res;
+        if (foundRes.has(res)) {
+          html += `<button type="button" class="order" disabled>Find sources of ${name} — site already found</button>`;
+        } else if (exhausted.has(res)) {
+          html += `<button type="button" class="order" disabled>Find sources of ${name} — none viable here</button>`;
+        } else {
+          const can = !busy;
+          html += btn(
+            "survey",
+            `Find sources of ${name}`,
+            b.id,
+            res,
+            can
+          );
+        }
+      }
+      html += btn("survey", "Broad composition survey", b.id, "", !busy);
+    }
+  }
 
   html += `<h2>Extraction sites</h2>`;
   if (!sites.length) {
-    html += `<p class="muted">None yet — order a survey sat to find one.</p>`;
+    html += `<p class="muted">None yet — pick a search above.</p>`;
   } else {
     for (const s of sites) {
       const tons = tonsLabel(s) || formatTons(s.amount_t);
+      const name = resNames[s.resource] || s.resource;
       html += btn(
         "mine",
-        `Extract ${s.resource} @ ${s.region}${tons ? " · " + tons : ""}`,
+        `Extract ${name} @ ${s.region}${tons ? " · " + tons : ""}`,
         s.id,
+        "",
         caps.includes("mine") && !busy
       );
     }
   }
   el.innerHTML = html;
 
-  function btn(order, label, target, enabled) {
-    return `<button type="button" class="order" data-order="${order}" data-target="${target}" ${
+  function btn(order, label, target, resource, enabled) {
+    return `<button type="button" class="order" data-order="${order}" data-target="${target}" data-resource="${resource || ""}" ${
       enabled ? "" : "disabled"
     }>${label}</button>`;
   }
@@ -442,6 +475,7 @@ async function renderOrders() {
             unit_id: u.id,
             order: button.dataset.order,
             target_id: button.dataset.target,
+            resource: button.dataset.resource || "",
           }),
         });
         render();

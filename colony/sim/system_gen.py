@@ -49,6 +49,21 @@ STAR_PROPER_NAMES = [
 ]
 
 
+def _searchable_resources(b: "Body") -> List[str]:
+    """Player-facing search targets for this body class (not a spoil of deposits)."""
+    pc = b.planet_class or b.kind
+    if pc in ("gas_giant", "ice_giant"):
+        return ["H2O", "CH4", "He", "Ar", "Xe"]
+    if pc == "moon":
+        if b.ice_likely:
+            return ["H2O", "CH4", "Fe", "Si", "N"]
+        return ["Fe", "Si", "Al", "H2O"]
+    if pc == "asteroid" or b.kind == "asteroid":
+        return ["Fe", "Si", "Al", "H2O", "CH4", "Cu", "MAG"]
+    # rocky default
+    return ["Fe", "Si", "Al", "Cu", "H2O", "N", "U", "Li", "MAG"]
+
+
 def format_tonnes(x: Optional[float]) -> Optional[str]:
     """Human tonnage: 4.2×10⁶ t (not 16-digit floats)."""
     if x is None:
@@ -203,75 +218,111 @@ class Body:
     ice_likely: bool = False
     metal_likely: bool = False
     planet_class: str = ""  # rocky | gas_giant | ice_giant | dwarf
-    survey_months: float = 0.0  # cumulative on-station survey time
+    survey_months: float = 0.0  # cumulative on-station survey time (any)
+    # Months spent *searching for* each resource (directed "find sources of Fe")
+    seek_months: Dict[str, float] = field(default_factory=dict)
+    # Resources confirmed absent after a directed search
+    seek_exhausted: List[str] = field(default_factory=list)
 
     def mu(self) -> float:
         return G * self.mass_kg
 
-    def apply_survey_time(self, months: float, rng: Optional[random.Random] = None) -> List[str]:
+    def _ensure_site(self, dep: "Deposit", rng: random.Random) -> Optional["MineSite"]:
+        if any(s.resource == dep.resource for s in self.mine_sites):
+            return next(s for s in self.mine_sites if s.resource == dep.resource)
+        region = rng.choice(_SITE_REGION)
+        site = MineSite(
+            id=f"{self.id}_{dep.resource}_site",
+            body_id=self.id,
+            resource=dep.resource,
+            grade=dep.grade,
+            amount_t=dep.amount_t * rng.uniform(0.15, 0.45),
+            name=f"{dep.resource} mine — {region}",
+            region=region,
+        )
+        self.mine_sites.append(site)
+        return site
+
+    def _progress_deposit(
+        self, dep: "Deposit", sm: float, rng: random.Random, directed: bool
+    ) -> List[str]:
+        """Advance one deposit along hint→detect→grade→site using seek time sm."""
+        notes: List[str] = []
+        old = dep.detail
+        r = _resource_rank(dep.resource)
+        if directed:
+            # Focused search is faster — you chose what to look for
+            t1, t2, t3, t4 = 0.35, 1.0, 2.0, 3.2
+        else:
+            t1 = 0.5 + r * 0.45
+            t2 = t1 + 1.0
+            t3 = t2 + 1.2
+            t4 = t3 + 1.8 + r * 0.25
+        if sm >= t1 and dep.detail < 1:
+            dep.detail = 1
+        if sm >= t2 and dep.detail < 2:
+            dep.detail = 2
+            dep.known = True
+        if sm >= t3 and dep.detail < 3:
+            dep.detail = 3
+            dep.known = True
+        if sm >= t4 and dep.detail < 4:
+            dep.detail = 4
+            dep.known = True
+            self._ensure_site(dep, rng)
+        if dep.detail > old:
+            if dep.detail == 1:
+                notes.append(f"spectral hint: {_resource_hint(dep.resource)}")
+            elif dep.detail == 2:
+                notes.append(f"confirmed {dep.resource} present")
+            elif dep.detail == 3:
+                notes.append(f"graded {dep.resource} (≈{dep.grade:.2f})")
+            elif dep.detail == 4:
+                site = next(s for s in self.mine_sites if s.resource == dep.resource)
+                notes.append(
+                    f"suitable {dep.resource} extraction site: {site.region} "
+                    f"({format_tonnes(site.amount_t)} available to claim)"
+                )
+        return notes
+
+    def apply_survey_time(
+        self,
+        months: float,
+        rng: Optional[random.Random] = None,
+        focus_resource: Optional[str] = None,
+    ) -> List[str]:
         """
         Longer on-station survey → finer detail.
-        Only after a *site* is located (detail 4) can you order a mine there.
+        If focus_resource is set (e.g. "Fe"), only that search advances —
+        "find sources of iron" is a real choice.
+        Site (detail 4) required before mining that resource here.
         """
         if months <= 0:
             return []
         rng = rng or random.Random(hash((self.id, int(self.survey_months * 100))) & 0xFFFFFFFF)
-        before = {d.resource: d.detail for d in self.deposits}
-        sites_before = {s.resource for s in self.mine_sites}
         self.survey_months += months
-        sm = self.survey_months
-
-        for dep in sorted(self.deposits, key=lambda d: _resource_rank(d.resource)):
-            r = _resource_rank(dep.resource)
-            # Months on station thresholds (common resources sooner)
-            t1 = 0.5 + r * 0.45  # spectral hint
-            t2 = t1 + 1.0  # confirmed detection
-            t3 = t2 + 1.2  # grade
-            t4 = t3 + 1.8 + r * 0.25  # find a place you can actually mine
-            if sm >= t1 and dep.detail < 1:
-                dep.detail = 1
-            if sm >= t2 and dep.detail < 2:
-                dep.detail = 2
-                dep.known = True
-            if sm >= t3 and dep.detail < 3:
-                dep.detail = 3
-                dep.known = True
-            if sm >= t4 and dep.detail < 4:
-                dep.detail = 4
-                dep.known = True
-                if dep.resource not in sites_before and not any(
-                    s.resource == dep.resource for s in self.mine_sites
-                ):
-                    region = rng.choice(_SITE_REGION)
-                    site_id = f"{self.id}_{dep.resource}_site"
-                    self.mine_sites.append(
-                        MineSite(
-                            id=site_id,
-                            body_id=self.id,
-                            resource=dep.resource,
-                            grade=dep.grade,
-                            amount_t=dep.amount_t * rng.uniform(0.15, 0.45),  # this site, not whole body
-                            name=f"{dep.resource} mine — {region}",
-                            region=region,
-                        )
-                    )
-
         notes: List[str] = []
-        for dep in self.deposits:
-            old = before.get(dep.resource, 0)
-            if dep.detail > old:
-                if dep.detail == 1:
-                    notes.append(f"spectral hint: {_resource_hint(dep.resource)}")
-                elif dep.detail == 2:
-                    notes.append(f"confirmed {dep.resource} present")
-                elif dep.detail == 3:
-                    notes.append(f"graded {dep.resource} (≈{dep.grade:.2f})")
-                elif dep.detail == 4:
-                    site = next(s for s in self.mine_sites if s.resource == dep.resource)
-                    notes.append(
-                        f"suitable {dep.resource} extraction site: {site.region} "
-                        f"({format_tonnes(site.amount_t)} available to claim)"
-                    )
+
+        if focus_resource:
+            key = focus_resource
+            self.seek_months[key] = self.seek_months.get(key, 0.0) + months
+            sm = self.seek_months[key]
+            dep = next((d for d in self.deposits if d.resource == key), None)
+            if dep is None:
+                # Directed search can conclude "nothing here"
+                if sm >= 2.5 and key not in self.seek_exhausted:
+                    self.seek_exhausted.append(key)
+                    notes.append(f"no viable {key} sources found on this body")
+                return notes
+            notes.extend(self._progress_deposit(dep, sm, rng, directed=True))
+            return notes
+
+        # Broad survey: slow progress on everything present
+        for dep in sorted(self.deposits, key=lambda d: _resource_rank(d.resource)):
+            # Use per-resource seek bucket so directed + broad share progress
+            self.seek_months[dep.resource] = self.seek_months.get(dep.resource, 0.0) + months * 0.55
+            sm = self.seek_months[dep.resource]
+            notes.extend(self._progress_deposit(dep, sm, rng, directed=False))
         return notes
 
 
@@ -392,8 +443,12 @@ class StarSystem:
             "ice_likely": b.ice_likely,
             "metal_likely": b.metal_likely,
             "survey_months": round(b.survey_months, 2),
+            "seek_months": {k: round(v, 2) for k, v in b.seek_months.items()},
+            "seek_exhausted": list(b.seek_exhausted),
             "deposits": [d.to_dict() for d in b.deposits],
             "mine_sites": [s.to_dict() for s in b.mine_sites],
+            # What you can *choose* to look for (priors), before full intel
+            "searchable_resources": _searchable_resources(b),
             "period_days": round(period_days, 2),
             "period_years": round(period_years, 3) if b.kind != "moon" else None,
             "period_label": (

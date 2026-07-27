@@ -59,6 +59,7 @@ class OrderBody(BaseModel):
     unit_id: str
     order: str  # survey | mine | move | idle
     target_id: str = ""
+    resource: str = ""  # for survey: "Fe" = find sources of iron
 
 
 @app.get("/api/health")
@@ -163,7 +164,9 @@ def start_haul(body: StartHaulBody):
 @app.post("/api/order")
 def order(body: OrderBody):
     try:
-        return room().issue_order(body.unit_id, body.order, body.target_id)
+        return room().issue_order(
+            body.unit_id, body.order, body.target_id, resource=body.resource or ""
+        )
     except Exception as e:
         raise HTTPException(400, str(e)) from e
 
