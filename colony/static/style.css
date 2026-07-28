@@ -554,6 +554,13 @@ details.drawer summary {
   color: var(--accent);
   letter-spacing: 0.04em;
 }
+.fleet-item.ctor-item .name::after {
+  content: " · build";
+  font-weight: 400;
+  font-size: 0.72rem;
+  color: #f0c14a;
+  letter-spacing: 0.04em;
+}
 .open-cascade-btn {
   width: 100%;
   margin-top: 8px;

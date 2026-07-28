@@ -253,8 +253,11 @@ function unitIsBusy(u) {
   if (!u) return false;
   return (
     (u.status === "en_route" && u.months_left > 0) ||
-    (u.status === "working" && u.order === "mine") ||
-    (u.status === "working" && u.order === "survey")
+    (u.status === "working" &&
+      (u.order === "mine" ||
+        u.order === "construct" ||
+        u.order === "harvest" ||
+        u.order === "survey"))
   );
 }
 
@@ -491,6 +494,10 @@ function renderCascade() {
     }
     if (u.kind === "survey") {
       renderSurveyCascade(root, u);
+      return;
+    }
+    if (u.kind === "constructor") {
+      renderConstructorCascade(root, u);
       return;
     }
     // Generic unit card fallback
@@ -1035,7 +1042,7 @@ function bodyCascadeTasksHtml(b) {
     .join("");
   let tasks = "";
   if (!u || u.kind === "ark") {
-    tasks = `<p class="muted">Pick a fleet unit above (survey sat, miner, hauler) to order it here.</p>`;
+    tasks = `<p class="muted">Pick a fleet unit above (survey, miner, hauler, construction bot) to order it here.</p>`;
   } else {
     tasks = `<div id="bc-task-list" class="choice-grid"><p class="muted">Loading tasks…</p></div>`;
   }
@@ -1224,6 +1231,43 @@ async function fillBodyCascadeTasks(b) {
           caps.includes("mine") && !busy
         );
       }
+    }
+  }
+
+  if (caps.includes("build") && u.kind === "constructor") {
+    html += `<h2>Construction</h2>`;
+    html += btn(
+      "harvest",
+      `Harvest timber logs on ${b.name}`,
+      b.id,
+      "log",
+      !busy
+    );
+    const structs = state.structure_builds || {};
+    const siteBuildings = new Set(b.site_buildings || []);
+    const stock = b.site_stockpile || {};
+    const arkStock = state.ark_stock || {};
+    const atHome = b.id === state.home_body_id;
+    for (const s of Object.values(structs)) {
+      const bid = s.building || s.id;
+      if (siteBuildings.has(bid)) {
+        html += `<button type="button" class="order" disabled>${s.name} — already here</button>`;
+        continue;
+      }
+      const cost = s.cost || {};
+      const short = [];
+      for (const [res, need] of Object.entries(cost)) {
+        let have = stock[res] || 0;
+        if (atHome) have += arkStock[res] || 0;
+        if (have + 1e-9 < need) short.push(`${(need - have).toFixed(0)} ${res}`);
+      }
+      const costLabel = Object.entries(cost)
+        .map(([k, v]) => `${v} ${k}`)
+        .join(", ");
+      const label = short.length
+        ? `Build ${s.name} (need ${short.join(", ")})`
+        : `Build ${s.name} (${costLabel} · ${s.months} mo)`;
+      html += btn("construct", label, b.id, s.id, !busy && short.length === 0);
     }
   }
 
@@ -1726,7 +1770,13 @@ function renderGenericUnitCascade(root, u) {
   cascade.tab = "actions";
   const loc = bodyById(u.location_id);
   const kindLabel =
-    u.kind === "miner" ? "Mining bot" : u.kind === "hauler" ? "Hauler" : u.kind;
+    u.kind === "miner"
+      ? "Mining bot"
+      : u.kind === "hauler"
+        ? "Hauler"
+        : u.kind === "constructor"
+          ? "Construction bot"
+          : u.kind;
   $("cascade-kicker").textContent = `${kindLabel} · action card`;
   $("cascade-title").innerHTML = `${escapeHtml(u.name)} <button type="button" class="cascade-rename" id="cascade-rename" title="Edit name">✎</button>`;
   $("cascade-sub").textContent = `${u.status}${u.order ? " / " + u.order : ""} · @ ${
@@ -1761,6 +1811,281 @@ function renderGenericUnitCascade(root, u) {
         alert(String(e.message || e).slice(0, 280));
       }
     };
+  }
+}
+
+function renderConstructorCascade(root, u) {
+  root.hidden = false;
+  root.querySelector(".cascade-window")?.classList.add("unit-card");
+  const tab = cascade.tab || "actions";
+  cascade.tab = tab;
+  const loc =
+    u.location_id === "ark"
+      ? null
+      : bodyById(u.location_id);
+  const locName =
+    u.location_id === "ark"
+      ? "ark dock"
+      : loc
+        ? loc.name
+        : u.location_id || "—";
+  const busy = unitIsBusy(u);
+  let mission = "Idle — ready to build or harvest.";
+  if (u.order === "construct" && u.status === "working") {
+    const s = (state.structure_builds || {})[u.search_resource] || {};
+    mission = `Assembling ${s.name || u.search_resource} · ${Number(u.months_left || 0).toFixed(1)} mo left`;
+  } else if (u.order === "harvest" && u.status === "working") {
+    mission = `Harvesting timber · ${Number(u.months_left || 0).toFixed(1)} mo left`;
+  } else if (u.status === "en_route") {
+    mission = `En route · ${u.order || "move"} · ${Number(u.months_left || 0).toFixed(2)} mo`;
+  }
+
+  $("cascade-kicker").textContent = "Construction bot · action card";
+  $("cascade-title").innerHTML = `${escapeHtml(u.name)} <button type="button" class="cascade-rename" id="cascade-rename" title="Edit name">✎</button>`;
+  $("cascade-sub").textContent = `${mission} · @ ${locName}${
+    u.dv_capacity_m_s > 0 ? " · Δv " + formatDv(u.dv_remaining_m_s) : ""
+  }`;
+  const rnTitle = $("cascade-rename");
+  if (rnTitle)
+    rnTitle.onclick = (ev) => {
+      ev.stopPropagation();
+      promptRenameUnit(u.id);
+    };
+
+  const tabs = [
+    { id: "actions", label: "Actions" },
+    { id: "build", label: "Build structure" },
+    { id: "harvest", label: "Harvest logs" },
+    { id: "move", label: "Move" },
+  ];
+  $("cascade-tabs").innerHTML = tabs
+    .map(
+      (t) =>
+        `<button type="button" class="cascade-tab ${t.id === tab ? "active" : ""}" data-tab="${t.id}">${t.label}</button>`
+    )
+    .join("");
+  $("cascade-tabs").querySelectorAll("[data-tab]").forEach((btn) => {
+    btn.onclick = () => {
+      cascade = { kind: "unit", unitId: u.id, tab: btn.dataset.tab };
+      renderCascade();
+    };
+  });
+
+  const body = $("cascade-body");
+  if (tab === "build") body.innerHTML = constructorBuildHtml(u, busy);
+  else if (tab === "harvest") body.innerHTML = constructorHarvestHtml(u, busy);
+  else if (tab === "move") body.innerHTML = surveyCascadeMoveHtml(u, loc);
+  else body.innerHTML = constructorActionsHtml(u, loc, locName, busy, mission);
+
+  bindConstructorCascade(body, u, tab);
+}
+
+function constructorActionsHtml(u, loc, locName, busy, mission) {
+  return `
+    ${dvBarHtml(u)}
+    <div class="card" style="margin-bottom:12px">
+      <p>${escapeHtml(mission)}</p>
+      <p class="muted">Location · ${escapeHtml(locName)}</p>
+    </div>
+    <div class="action-stack">
+      <button type="button" class="action-card" data-goto="build">
+        <span class="action-title">Build a structure</span>
+        <span class="action-desc">Assemble solar, habitat, pads, extractors… from site/ark materials.</span>
+      </button>
+      <button type="button" class="action-card" data-goto="harvest">
+        <span class="action-title">Harvest timber logs</span>
+        <span class="action-desc">Mill structural logs for habitats and launch pads.</span>
+      </button>
+      <button type="button" class="action-card" data-goto="move">
+        <span class="action-title">Move to a body</span>
+        <span class="action-desc">Transit costs time and Δv.</span>
+      </button>
+      <button type="button" class="action-card primary-action" data-return-ark="1" ${busy ? "disabled" : ""}>
+        <span class="action-title">Return to ark</span>
+        <span class="action-desc">Dock and refill Δv tanks.</span>
+      </button>
+      <button type="button" class="action-card danger-action" data-idle="1" ${
+        u.status === "idle" && !u.order ? "disabled" : ""
+      }>
+        <span class="action-title">Stand by / recall</span>
+        <span class="action-desc">Cancel assignment (reserved materials stay spent if mid-build).</span>
+      </button>
+    </div>
+  `;
+}
+
+function constructorBuildHtml(u, busy) {
+  const destDefault = selectedBodyId || (u.location_id !== "ark" ? u.location_id : state.home_body_id) || "";
+  const structs = state.structure_builds || {};
+  const cards = Object.values(structs)
+    .map((s) => {
+      const cost = Object.entries(s.cost || {})
+        .map(([k, v]) => `${v} t ${k}`)
+        .join(", ");
+      return `<div class="card">
+        <h3>${escapeHtml(s.name)}</h3>
+        <p>${escapeHtml(s.description || "")}</p>
+        <p class="muted">${cost} · ${s.months} mo on site</p>
+        <button type="button" class="primary" data-construct="${s.id}" ${busy ? "disabled" : ""} style="width:100%">
+          ${busy ? "Busy" : "Assemble here"}
+        </button>
+      </div>`;
+    })
+    .join("");
+  return `
+    <p class="cascade-section-lead">
+      Materials come from the <strong>body stockpile</strong> first; on the home world the bot can also pull from
+      <strong>ark cargo</strong>. Harvest timber logs first if a recipe needs <code>log</code>.
+      Ark fab can still drop prefab kits without a bot.
+    </p>
+    <div class="card">
+      <label>Build on
+        <select id="co-build-body">${bodyPickerOptions(destDefault)}</select>
+      </label>
+    </div>
+    <div class="cascade-grid" style="margin-top:12px">${cards}</div>
+  `;
+}
+
+function constructorHarvestHtml(u, busy) {
+  const destDefault = selectedBodyId || (u.location_id !== "ark" ? u.location_id : state.home_body_id) || "";
+  return `
+    <p class="cascade-section-lead">
+      Cut and mill <strong>timber logs</strong> from local organics / carbonaceous rock.
+      Habitats and launch pads need framing logs. One shift ≈ a month of work.
+    </p>
+    <div class="card">
+      <label>Harvest on
+        <select id="co-harvest-body">${bodyPickerOptions(destDefault)}</select>
+      </label>
+      <button type="button" class="primary" id="co-harvest-go" style="width:100%;margin-top:12px" ${
+        busy ? "disabled" : ""
+      }>
+        ${busy ? "Busy" : "Start timber harvest"}
+      </button>
+    </div>
+  `;
+}
+
+function bindConstructorCascade(bodyEl, u, tab) {
+  const reOpen = (t) => {
+    cascade = { kind: "unit", unitId: u.id, tab: t || tab };
+    render();
+  };
+
+  bodyEl.querySelectorAll("[data-goto]").forEach((btn) => {
+    btn.onclick = () => {
+      cascade = { kind: "unit", unitId: u.id, tab: btn.dataset.goto };
+      renderCascade();
+    };
+  });
+
+  const idleBtn = bodyEl.querySelector("[data-idle]");
+  if (idleBtn) {
+    idleBtn.onclick = async () => {
+      try {
+        await issueUnitOrder(u.id, "idle");
+        reOpen("actions");
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 280));
+      }
+    };
+  }
+  const retBtn = bodyEl.querySelector("[data-return-ark]");
+  if (retBtn) {
+    retBtn.onclick = async () => {
+      try {
+        if (unitIsBusy(u)) await issueUnitOrder(u.id, "idle");
+        await issueUnitOrder(u.id, "return_ark");
+        reOpen("actions");
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 320));
+      }
+    };
+  }
+
+  if (tab === "build") {
+    bodyEl.querySelectorAll("[data-construct]").forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          const sel = bodyEl.querySelector("#co-build-body");
+          const dest = sel ? sel.value : state.home_body_id;
+          if (unitIsBusy(u)) await issueUnitOrder(u.id, "idle");
+          await issueUnitOrder(u.id, "construct", dest, btn.dataset.construct);
+          selectedBodyId = dest;
+          reOpen("actions");
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 360));
+        }
+      };
+    });
+  }
+
+  if (tab === "harvest") {
+    const go = bodyEl.querySelector("#co-harvest-go");
+    if (go) {
+      go.onclick = async () => {
+        try {
+          const sel = bodyEl.querySelector("#co-harvest-body");
+          const dest = sel ? sel.value : state.home_body_id;
+          if (unitIsBusy(u)) await issueUnitOrder(u.id, "idle");
+          await issueUnitOrder(u.id, "harvest", dest, "log");
+          selectedBodyId = dest;
+          reOpen("actions");
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 320));
+        }
+      };
+    }
+  }
+
+  if (tab === "move") {
+    // Reuse survey move binders pattern
+    const destSel = bodyEl.querySelector("#sv-move-dest");
+    const estEl = bodyEl.querySelector("#sv-move-est");
+    const go = bodyEl.querySelector("#sv-move-go");
+    const updateEst = async () => {
+      if (!destSel || !estEl) return;
+      try {
+        const est = await api("/api/estimate_order", {
+          method: "POST",
+          body: JSON.stringify({
+            unit_id: u.id,
+            order: "move",
+            target_id: destSel.value,
+          }),
+        });
+        let time = "";
+        if (est.years >= 0.5) time = `~${est.years.toFixed(2)} y (${est.months.toFixed(1)} mo)`;
+        else if (est.months >= 1) time = `~${est.months.toFixed(1)} mo`;
+        else time = `~${Math.max(1, Math.round(est.months * 30))} d`;
+        const dv = est.dv_m_s != null ? formatDv(est.dv_m_s) : "—";
+        const after = est.dv_after_m_s != null ? ` → ${formatDv(est.dv_after_m_s)} left` : "";
+        const ok = est.can_afford_dv !== false;
+        estEl.innerHTML = ok
+          ? `Transit ${time} · burns <strong>${dv}</strong> Δv${after}`
+          : `<span style="color:#e88">Need ${dv} Δv — only ${formatDv(
+              est.dv_remaining_m_s
+            )} left.</span>`;
+        if (go) go.disabled = !ok;
+      } catch (_) {
+        estEl.textContent = "Could not estimate transit.";
+      }
+    };
+    if (destSel) destSel.onchange = updateEst;
+    updateEst();
+    if (go) {
+      go.onclick = async () => {
+        try {
+          if (unitIsBusy(u)) await issueUnitOrder(u.id, "idle");
+          await issueUnitOrder(u.id, "move", destSel.value);
+          selectedBodyId = destSel.value;
+          reOpen("actions");
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 320));
+        }
+      };
+    }
   }
 }
 
@@ -2036,9 +2361,9 @@ function arkCascadeFabHtml() {
   return `
     <p class="cascade-section-lead">
       One fabrication bay — only <strong>one job at a time</strong>. Finish (warp) the current job before authorizing the next.
-      Structures: <strong>power</strong> (solar / genset), <strong>mining</strong> (extractor),
-      <strong>lift</strong> (mass driver or launch pad + rocket fab + fuel + recovery),
-      <strong>habitat</strong>, depots, L1 shield. See the Process board for goals.
+      Fleet units include <strong>construction bots</strong> (on-site assembly + timber harvest).
+      Structures can also be prefab kits from this bay. Power → mining/lift → habitat.
+      Habitats need <strong>timber logs</strong> (harvest with a construction bot).
     </p>
     <h2>Bay (single berth)</h2>
     <div class="queue-list">${queueHtml}</div>
@@ -2253,6 +2578,7 @@ function renderFleet() {
     .map((u) => {
       const isArk = u.kind === "ark";
       const isSurvey = u.kind === "survey";
+      const isCtor = u.kind === "constructor";
       let locLabel = "ark";
       if (u.location_id === "ark" || u.location_id === "ark_orbit") {
         const home = bodyById(state.home_body_id);
@@ -2269,7 +2595,7 @@ function renderFleet() {
             : `<div class="meta">@ ${locLabel} · click for card</div>`;
       return `<button type="button" class="fleet-item ${isArk ? "ark-item" : ""} ${
         isSurvey ? "survey-item" : ""
-      } ${selectedUnitId === u.id ? "selected" : ""}" data-unit="${u.id}">
+      } ${isCtor ? "ctor-item" : ""} ${selectedUnitId === u.id ? "selected" : ""}" data-unit="${u.id}">
         <div class="name">${u.name}</div>
         <div class="meta">${u.kind}</div>${busy}
       </button>`;
@@ -2334,6 +2660,30 @@ function renderUnitPanel() {
         Open probe actions
       </button>`;
     const b = $("btn-open-survey");
+    if (b) b.onclick = () => openUnitCascade(u.id, "actions");
+    return;
+  }
+  if (u.kind === "constructor") {
+    el.hidden = false;
+    el.className = "card";
+    const loc =
+      u.location_id === "ark"
+        ? null
+        : bodyById(u.location_id);
+    const where =
+      u.location_id === "ark"
+        ? "ark dock"
+        : loc
+          ? loc.name
+          : u.location_id;
+    el.innerHTML = `<h3>${u.name}</h3>
+      <p class="muted">Construction bot · structures + timber</p>
+      <p>@ ${where} · ${u.status}${u.order ? " / " + u.order : ""}</p>
+      ${dvBarHtml(u)}
+      <button type="button" class="primary open-cascade-btn" id="btn-open-ctor">
+        Open construction actions
+      </button>`;
+    const b = $("btn-open-ctor");
     if (b) b.onclick = () => openUnitCascade(u.id, "actions");
     return;
   }

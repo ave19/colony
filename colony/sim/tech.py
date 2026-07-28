@@ -51,6 +51,7 @@ RESOURCE_NAMES = {
     "radiator": "Radiator",
     "food": "Food",
     "N": "Nitrogen",
+    "log": "Timber log",
 }
 
 
@@ -137,14 +138,14 @@ BUILDINGS = {
     "habitat_module": BuildingType(
         "habitat_module",
         "Habitation module",
-        {"steel": 60, "chip": 6, "H2O": 15, "panel": 8},
-        "Pressurized living volume. Required for population growth off-ark.",
+        {"steel": 50, "chip": 6, "H2O": 15, "panel": 8, "log": 25},
+        "Pressurized living volume. Timber framing + steel pressure shell. Required for off-ark growth.",
         ["hab"],
     ),
     "launch_pad": BuildingType(
         "launch_pad",
         "Launch pad",
-        {"steel": 70, "chip": 4, "Al": 20},
+        {"steel": 65, "chip": 4, "Al": 20, "log": 10},
         "Chemical launch facility for surface-to-orbit rockets (heavy-world lift path).",
         ["launch"],
     ),
@@ -374,6 +375,17 @@ UNIT_BUILDS = {
         "dv_capacity_m_s": 8000.0,
         "description": "Chemical tug for orbital cargo. Burns cargo chem_prop on hauls; tanks still matter for station moves.",
     },
+    "constructor": {
+        "id": "constructor",
+        "name": "Construction bot",
+        "kind": "constructor",
+        "cost": {"steel": 18.0, "chip": 5.0, "panel": 2.0, "Al": 6.0},
+        "months": 2.2,
+        "capabilities": ["build"],
+        "dv_capacity_m_s": 5500.0,
+        "description": "Assembles site structures from local stockpiles (or ark stores when at home). "
+        "Also harvests timber logs on suitable worlds for framing habitats and pads.",
+    },
 }
 
 # Site structures the ark fabricates then deploys to a body (not fleet units).
@@ -431,18 +443,18 @@ STRUCTURE_BUILDS = {
         "name": "Habitation module",
         "kind": "structure",
         "building": "habitat_module",
-        "cost": {"steel": 60.0, "chip": 6.0, "H2O": 15.0, "panel": 8.0},
+        "cost": {"steel": 50.0, "chip": 6.0, "H2O": 15.0, "panel": 8.0, "log": 25.0},
         "months": 3.0,
-        "description": "Pressurized living volume for settlers. Enables natural population growth.",
+        "description": "Pressurized living volume. Needs timber logs + steel. Construction bots assemble on site; ark can prefab kits.",
     },
     "launch_pad": {
         "id": "launch_pad",
         "name": "Launch pad",
         "kind": "structure",
         "building": "launch_pad",
-        "cost": {"steel": 70.0, "chip": 4.0, "Al": 20.0},
+        "cost": {"steel": 65.0, "chip": 4.0, "Al": 20.0, "log": 10.0},
         "months": 3.5,
-        "description": "Chemical rocket launch facility — heavy-world path when mass drivers cannot work.",
+        "description": "Chemical rocket launch facility — heavy-world path when mass drivers cannot work. Uses timber formwork.",
     },
     "rocket_fab": {
         "id": "rocket_fab",

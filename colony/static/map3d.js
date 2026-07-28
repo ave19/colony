@@ -221,7 +221,9 @@ export class SystemMap3D {
                 ? 0xe8a23a
                 : u.kind === "hauler"
                   ? 0xc08aff
-                  : 0xcccccc;
+                  : u.kind === "constructor"
+                    ? 0xf0c14a
+                    : 0xcccccc;
         const r = u.kind === "ark" ? 0.12 : 0.07;
         const mesh = new THREE.Mesh(
           new THREE.SphereGeometry(r, 12, 12),

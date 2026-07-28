@@ -143,12 +143,12 @@ CAP_COMMAND = "command"
 class FleetUnit:
     id: str
     name: str
-    kind: str  # ark | survey | miner | hauler
+    kind: str  # ark | survey | miner | hauler | constructor
     location_id: str  # body id, or "ark" while docked at the colony ship
     status: str = "idle"  # idle | en_route | working
     order: str = ""
     target_id: str = ""
-    search_resource: str = ""  # directed survey: "Fe", "H2O", …
+    search_resource: str = ""  # survey focus, or structure id for construct
     months_left: float = 0.0
     months_total: float = 0.0  # for transit progress on map
     transit_from_id: str = ""  # where this hop started (map path)
@@ -238,7 +238,12 @@ class Game:
         self.sites: Dict[str, Site] = {}
         self.fleet: Dict[str, FleetUnit] = {}
         self.build_queue: List[BuildJob] = []
-        self._unit_seq: Dict[str, int] = {"survey": 0, "miner": 0, "hauler": 0}
+        self._unit_seq: Dict[str, int] = {
+            "survey": 0,
+            "miner": 0,
+            "hauler": 0,
+            "constructor": 0,
+        }
         # Track which discovery keys already posted (avoid spam)
         self._discovery_keys: set = set()
         # Ark inventory (materials / seed stock — specialized gear is built later)
@@ -253,6 +258,7 @@ class Game:
             "chip": 40.0,
             "panel": 20.0,
             "chem_prop": 60.0,
+            "log": 40.0,  # seed timber for early framing
             "Xe": 0.0,  # spent on arrival
         }
         self.population = ARK_POPULATION
@@ -316,7 +322,11 @@ class Game:
             elif u.status == "working" and u.order == "survey":
                 # Continuous survey: learn more the longer you sit
                 self._tick_survey(u, months)
-            elif u.status == "working" and u.order == "mine" and u.months_left > 0:
+            elif (
+                u.status == "working"
+                and u.order in ("mine", "construct", "harvest")
+                and u.months_left > 0
+            ):
                 u.months_left -= months
                 if u.months_left <= 0:
                     self._complete_unit_order(u)
@@ -1071,79 +1081,90 @@ class Game:
             break
         self.build_queue = [j for j in self.build_queue if j.status == "building"]
 
+    def _structure_extra_note(self, building_id: str) -> str:
+        notes = {
+            "refuel_depot": " Units can refuel Δv here.",
+            "mass_driver": (
+                f" Needs ≥{MASS_DRIVER_POWER_MW:.0f} MW site power to fire "
+                "(solar farm / chem genset)."
+            ),
+            "solar_farm": " Feeding local power bus.",
+            "chem_genset": " Baseload available while chem_prop lasts.",
+            "l1_magnetic_shield": (
+                " Artificial magnetosphere online at sunward L1 — "
+                "radiation shield for open-air settlement."
+            ),
+            "habitat_module": " Living volume online — population can grow off-ark.",
+            "launch_pad": " Chemical ascent pad ready — needs rockets + fuel.",
+            "rocket_fab": " Building landers/boosters when materials allow.",
+            "fuel_fab": " Producing chem_prop from CH₄/O₂ stock.",
+            "recovery_pad": " Reusable booster recovery online.",
+            "extractor": " Continuous mining on known deposits (needs power).",
+        }
+        return notes.get(building_id, "")
+
+    def _structure_next_step(self, building_id: str, name: str = "") -> str:
+        next_map = {
+            "solar_farm": "Power online — pair with extractor or mass driver.",
+            "chem_genset": "Baseload ready — keep chem_prop stocked.",
+            "mass_driver": "Arm the rail when power ≥18 MW; shoot ore to orbit.",
+            "launch_pad": "Build rocket fab + fuel plant to close the chemical lift loop.",
+            "rocket_fab": "Stock steel/Al/chips; pair with launch pad + fuel plant.",
+            "fuel_fab": "Feed CH₄/O₂ (or haul prop) — supplies pads and gensets.",
+            "recovery_pad": "Reusable flight loop closed — cut booster attrition.",
+            "habitat_module": "Settlers can grow population here; expand industry nearby.",
+            "extractor": "Haul ore home or feed a refinery / mass driver.",
+            "refuel_depot": "Send low-Δv craft here to top tanks.",
+            "l1_magnetic_shield": "Open-air settlement path unblocked if air/water allow.",
+        }
+        return next_map.get(
+            building_id, f"Integrate {name or building_id} into the site logistics loop."
+        )
+
+    def _place_structure(
+        self, body_id: str, building_id: str, display_name: str, *, by: str = ""
+    ) -> None:
+        """Put a structure on a body, log, and journal the milestone."""
+        site = self.sites.setdefault(body_id, Site(body_id=body_id))
+        if building_id not in site.buildings:
+            site.buildings.append(building_id)
+        if building_id == "refuel_depot":
+            site.stockpile["chem_prop"] = site.stockpile.get("chem_prop", 0.0) + 25.0
+        body = self.system.body_by_id(body_id) if self.system else None
+        where = body.name if body else body_id
+        extra = self._structure_extra_note(building_id)
+        who = f" ({by})" if by else ""
+        self._log("build", f"Deployed {display_name} at {where}{who}.{extra}")
+        self._discover(
+            "structure",
+            f"{display_name} online at {where}",
+            body_id=body_id,
+            key=f"struct:{body_id}:{building_id}",
+            next_step=self._structure_next_step(building_id, display_name),
+        )
+
     def _finish_build(self, job: BuildJob) -> None:
         home = self.home_body_id or (
             self.sites.get("ark_orbit").body_id if self.sites.get("ark_orbit") else "p0"
         )
-        # Structure deploy
+        # Structure deploy (ark prefab kit)
         if job.building_id:
             body_id = job.deploy_body_id or home
-            site = self.sites.setdefault(body_id, Site(body_id=body_id))
-            if job.building_id not in site.buildings:
-                site.buildings.append(job.building_id)
-            # Seed propellant stock for depots
-            if job.building_id == "refuel_depot":
-                site.stockpile["chem_prop"] = site.stockpile.get("chem_prop", 0.0) + 25.0
-            body = self.system.body_by_id(body_id) if self.system else None
-            where = body.name if body else body_id
-            extra = ""
-            if job.building_id == "refuel_depot":
-                extra = " Units can refuel Δv here."
-            elif job.building_id == "mass_driver":
-                extra = (
-                    f" Needs ≥{MASS_DRIVER_POWER_MW:.0f} MW site power to fire "
-                    "(solar farm / chem genset)."
-                )
-            elif job.building_id == "solar_farm":
-                extra = " Feeding local power bus."
-            elif job.building_id == "chem_genset":
-                extra = " Baseload available while chem_prop lasts."
-            elif job.building_id == "l1_magnetic_shield":
-                extra = (
-                    " Artificial magnetosphere online at sunward L1 — "
-                    "radiation shield for open-air settlement."
-                )
-            elif job.building_id == "habitat_module":
-                extra = " Living volume online — population can grow off-ark."
-            elif job.building_id == "launch_pad":
-                extra = " Chemical ascent pad ready — needs rockets + fuel."
-            elif job.building_id == "rocket_fab":
-                extra = " Building landers/boosters when materials allow."
-            elif job.building_id == "fuel_fab":
-                extra = " Producing chem_prop from CH₄/O₂ stock."
-            elif job.building_id == "recovery_pad":
-                extra = " Reusable booster recovery online."
-            elif job.building_id == "extractor":
-                extra = " Continuous mining on known deposits (needs power)."
-            self._log("build", f"Deployed {job.name} at {where}.{extra}")
-            # Process journal: industry milestones
-            next_map = {
-                "solar_farm": "Power online — pair with extractor or mass driver.",
-                "chem_genset": "Baseload ready — keep chem_prop stocked.",
-                "mass_driver": "Arm the rail when power ≥18 MW; shoot ore to orbit.",
-                "launch_pad": "Build rocket fab + fuel plant to close the chemical lift loop.",
-                "rocket_fab": "Stock steel/Al/chips; pair with launch pad + fuel plant.",
-                "fuel_fab": "Feed CH₄/O₂ (or haul prop) — supplies pads and gensets.",
-                "recovery_pad": "Reusable flight loop closed — cut booster attrition.",
-                "habitat_module": "Settlers can grow population here; expand industry nearby.",
-                "extractor": "Haul ore home or feed a refinery / mass driver.",
-                "refuel_depot": "Send low-Δv craft here to top tanks.",
-                "l1_magnetic_shield": "Open-air settlement path unblocked if air/water allow.",
-            }
-            self._discover(
-                "structure",
-                f"{job.name} online at {where}",
-                body_id=body_id,
-                key=f"struct:{body_id}:{job.building_id}",
-                next_step=next_map.get(
-                    job.building_id, f"Integrate {job.name} into the site logistics loop."
-                ),
+            self._place_structure(
+                body_id, job.building_id, job.name, by="ark fab kit"
             )
             return
 
         self._unit_seq[job.unit_kind] = self._unit_seq.get(job.unit_kind, 0) + 1
         n = self._unit_seq[job.unit_kind]
-        uid = f"{job.unit_kind[0:2]}{n}"
+        # Distinct ids: constructor → co1, survey → su1, miner → mi1, hauler → ha1
+        prefix = {
+            "survey": "su",
+            "miner": "mi",
+            "hauler": "ha",
+            "constructor": "co",
+        }.get(job.unit_kind, job.unit_kind[:2])
+        uid = f"{prefix}{n}"
         name = f"{job.name} {n}"
         cap = float(job.dv_capacity_m_s or 0.0)
         # Craft leave the fabrication bay *on the ark* — not already on the planet.
@@ -1336,6 +1357,14 @@ class Game:
                 elif u.order == "mine":
                     label = f"{u.name} arrives at extraction site on {dest_name}"
                     kind = "mine_arrival"
+                elif u.order == "construct":
+                    spec = STRUCTURE_BUILDS.get(u.search_resource or "", {})
+                    sname = spec.get("name") or u.search_resource or "structure"
+                    label = f"{u.name} arrives to build {sname} on {dest_name}"
+                    kind = "construct_arrival"
+                elif u.order == "harvest":
+                    label = f"{u.name} arrives to harvest timber on {dest_name}"
+                    kind = "harvest_arrival"
                 elif u.order == "return_ark":
                     label = f"{u.name} returns to ark (refuel)"
                     kind = "return_ark"
@@ -1359,6 +1388,26 @@ class Game:
                     {
                         "kind": "mine",
                         "label": f"{u.name} finishes mining shift",
+                        "months": u.months_left,
+                        "unit_id": u.id,
+                    }
+                )
+            elif u.status == "working" and u.order == "construct" and u.months_left > 0:
+                spec = STRUCTURE_BUILDS.get(u.search_resource or "", {})
+                sname = spec.get("name") or u.search_resource or "structure"
+                items.append(
+                    {
+                        "kind": "construct",
+                        "label": f"{u.name} finishes {sname}",
+                        "months": u.months_left,
+                        "unit_id": u.id,
+                    }
+                )
+            elif u.status == "working" and u.order == "harvest" and u.months_left > 0:
+                items.append(
+                    {
+                        "kind": "harvest",
+                        "label": f"{u.name} finishes timber harvest",
                         "months": u.months_left,
                         "unit_id": u.id,
                     }
@@ -1588,17 +1637,19 @@ class Game:
             has_survey = any(u.kind == "survey" for u in self.fleet.values())
             has_miner = any(u.kind == "miner" for u in self.fleet.values())
             has_hauler = any(u.kind == "hauler" for u in self.fleet.values())
+            has_builder = any(u.kind == "constructor" for u in self.fleet.values())
             goals.append(
                 {
                     "id": "bootstrap_fleet",
                     "label": "Bootstrap fleet from ark fab",
                     "status": "done"
-                    if (has_survey and has_miner and has_hauler)
+                    if (has_survey and has_miner and has_hauler and has_builder)
                     else "active",
                     "detail": (
-                        f"Survey sats: {'✓' if has_survey else 'need'} · "
+                        f"Survey: {'✓' if has_survey else 'need'} · "
                         f"Miners: {'✓' if has_miner else 'need'} · "
-                        f"Haulers: {'✓' if has_hauler else 'need'}"
+                        f"Haulers: {'✓' if has_hauler else 'need'} · "
+                        f"Construction: {'✓' if has_builder else 'need'}"
                     ),
                 }
             )
@@ -1798,6 +1849,11 @@ class Game:
                 next_focus = {
                     "text": "No survey craft yet",
                     "next_step": "Open ark console → Fabrication → build a survey satellite, then Warp.",
+                }
+            elif not has_builder:
+                next_focus = {
+                    "text": "No construction bots yet",
+                    "next_step": "Ark fab → Construction bot. Bots harvest timber logs and assemble site structures.",
                 }
             elif not sites_found:
                 next_focus = {
@@ -2113,6 +2169,8 @@ class Game:
             cost = max(200.0, dv_h * 0.22)
         elif unit_kind == "miner":
             cost = max(250.0, dv_h * 0.28)
+        elif unit_kind == "constructor":
+            cost = max(240.0, dv_h * 0.30)
         else:
             cost = max(300.0, dv_h * 0.35)
         if ark_leg:
@@ -2249,10 +2307,19 @@ class Game:
         if not u or not self.system:
             return {"months": 0, "travel_months": 0, "work_months": 0, "dv_m_s": 0}
         work = 0.0
+        note = ""
         if order == "survey":
             work = 0.0
+            note = "Then stays on station; detail improves over months until you recall it."
         elif order == "mine":
             work = 1.5
+        elif order == "construct":
+            # target_id may be body; resource field not passed here — work from average
+            work = 2.5
+            note = "On-site assembly from local stockpile (ark stock if at home)."
+        elif order == "harvest":
+            work = 1.0
+            note = "Cut and mill timber logs into the site stockpile."
         elif order in ("move", "return_ark"):
             work = 0.0
         elif order == "idle":
@@ -2288,9 +2355,6 @@ class Game:
         dv = (
             self._travel_dv_m_s(u.location_id, dest_body, u.kind) if dest_body else 0.0
         )
-        note = ""
-        if order == "survey":
-            note = "Then stays on station; detail improves over months until you recall it."
         if order == "return_ark":
             note = "Arriving at ark refills Δv tanks."
         can = u.dv_capacity_m_s <= 0 or u.dv_remaining_m_s + 1e-6 >= dv
@@ -2359,12 +2423,140 @@ class Game:
                         else "Review Habitability tab on the body card.",
                     )
 
+    def _body_can_yield_logs(self, body) -> bool:
+        """Timber / structural organics available enough to harvest."""
+        if not body:
+            return False
+        if body.kind == "asteroid":
+            return True  # carbonaceous / organics in matrix
+        if body.kind in ("planet", "moon"):
+            if getattr(body, "has_atmosphere", False):
+                return True
+            if any(d.resource == "CH4" for d in body.deposits):
+                return True
+            if body.planet_class in ("rocky", "moon", "ice"):
+                return True  # sparse subsurface organics / imported seed stock mill
+        return False
+
+    def _log_harvest_yield(self, body) -> float:
+        """Tonnes of timber logs from one harvest shift."""
+        if not body:
+            return 20.0
+        if body.kind == "asteroid":
+            return 18.0
+        if getattr(body, "has_atmosphere", False) and body.planet_class == "rocky":
+            return 55.0
+        if any(d.resource == "CH4" and d.known for d in body.deposits):
+            return 40.0
+        return 28.0
+
+    def _site_and_ark_have(self, body_id: str, cost: Dict[str, float]) -> Dict[str, float]:
+        """How much of each cost resource is available (site + ark when body is home)."""
+        site = self.sites.get(body_id)
+        stock: Dict[str, float] = dict(site.stockpile) if site else {}
+        # When building at home world, bots can draw ark cargo as well
+        if body_id == self.home_body_id or body_id == "ark":
+            for k, v in self.ark_stock.items():
+                stock[k] = stock.get(k, 0.0) + v
+        return {k: stock.get(k, 0.0) for k in cost}
+
+    def _consume_build_materials(self, body_id: str, cost: Dict[str, float]) -> None:
+        """Pull cost from site stockpile first, then ark (if home). Raises if short."""
+        have = self._site_and_ark_have(body_id, cost)
+        for res, need in cost.items():
+            if have.get(res, 0.0) + 1e-9 < need:
+                raise ValueError(
+                    f"need {need} t {RESOURCE_NAMES.get(res, res)}, "
+                    f"have {have.get(res, 0):.1f} on site/ark"
+                )
+        site = self.sites.setdefault(body_id, Site(body_id=body_id))
+        for res, need in cost.items():
+            left = need
+            site_have = site.stockpile.get(res, 0.0)
+            take = min(site_have, left)
+            if take > 0:
+                site.stockpile[res] = site_have - take
+                left -= take
+            if left > 1e-9 and (
+                body_id == self.home_body_id or body_id == "ark"
+            ):
+                self.ark_stock[res] = self.ark_stock.get(res, 0.0) - left
+                left = 0.0
+            if left > 1e-9:
+                raise ValueError(f"could not reserve {need} t {res}")
+
+    def _validate_structure_on_body(self, body, building_id: str, body_id: str) -> None:
+        if not body:
+            raise ValueError("unknown body")
+        site = self.sites.get(body_id)
+        if site and building_id in site.buildings:
+            raise ValueError("that body already has this structure")
+        if building_id == "mass_driver" and not self.body_allows_mass_driver(body):
+            raise ValueError(f"{body.name} well is too deep for a mass driver")
+        if building_id == "l1_magnetic_shield" and body.planet_class in (
+            "gas_giant",
+            "ice_giant",
+            "asteroid",
+        ):
+            raise ValueError(
+                f"L1 magnetic shield is for rocky worlds/moons — not {body.planet_class}"
+            )
+
+    def _begin_construct_work(self, u: FleetUnit, body_id: str, struct_id: str) -> None:
+        """On-station: reserve materials and start assembly timer."""
+        spec = STRUCTURE_BUILDS.get(struct_id)
+        if not spec:
+            raise ValueError(f"unknown structure {struct_id}")
+        body = self.system.body_by_id(body_id) if self.system else None
+        self._validate_structure_on_body(body, spec.get("building") or struct_id, body_id)
+        cost = dict(spec.get("cost") or {})
+        self._consume_build_materials(body_id, cost)
+        work = float(spec.get("months") or 2.0)
+        u.location_id = body_id
+        u.order = "construct"
+        u.target_id = body_id
+        u.search_resource = struct_id  # structure build id
+        u.status = "working"
+        u.months_total = work
+        u.months_left = work
+        u.transit_from_id = body_id
+        cost_s = ", ".join(f"{v:g} t {k}" for k, v in cost.items())
+        self._log(
+            "build",
+            f"{u.name} begins assembling {spec['name']} on "
+            f"{body.name if body else body_id} ({work:.1f} mo). "
+            f"Materials reserved: {cost_s}.",
+        )
+
+    def _begin_harvest_work(self, u: FleetUnit, body_id: str) -> None:
+        body = self.system.body_by_id(body_id) if self.system else None
+        if not body or not self._body_can_yield_logs(body):
+            raise ValueError("no harvestable timber / organics on that body")
+        work = 1.0
+        u.location_id = body_id
+        u.order = "harvest"
+        u.target_id = body_id
+        u.search_resource = "log"
+        u.status = "working"
+        u.months_total = work
+        u.months_left = work
+        u.transit_from_id = body_id
+        y = self._log_harvest_yield(body)
+        self._log(
+            "build",
+            f"{u.name} starts timber harvest on {body.name} "
+            f"({work:.1f} mo, ~{y:.0f} t logs expected).",
+        )
+
     def issue_order(
         self, unit_id: str, order: str, target_id: str = "", resource: str = ""
     ) -> dict:
         """
-        Apply a unit's capability: survey | mine | move | return_ark | refuel | idle.
+        Apply a unit's capability: survey | mine | construct | harvest | move |
+        return_ark | refuel | idle.
         Survey with resource="Fe" means "find sources of iron" on that body.
+        Construct with resource=structure_id builds on target body from stockpiles.
+        Harvest with resource="log" mills timber into the site stockpile.
         Mine requires a found extraction site.
         Units with dv_capacity spend Δv on transit; return_ark / depot refuels.
         """
@@ -2372,16 +2564,22 @@ class Game:
         u = self.fleet.get(unit_id)
         if not u:
             raise ValueError("unknown unit")
-        # Busy if en_route with time left, or mining shift, or surveying (must idle first)
+        # Busy if en_route with time left, or timed work, or surveying (must idle first)
         if u.status == "en_route" and u.months_left > 0:
             raise ValueError(f"{u.name} is en route")
-        if u.status == "working" and u.order == "mine" and u.months_left > 0:
-            raise ValueError(f"{u.name} is mining")
+        if (
+            u.status == "working"
+            and u.order in ("mine", "construct", "harvest")
+            and u.months_left > 0
+        ):
+            raise ValueError(f"{u.name} is busy ({u.order})")
         if u.status == "working" and u.order == "survey" and order != "idle":
             raise ValueError(f"{u.name} is surveying — stand by (idle) to reassign")
         assert self.system
 
         if order == "idle":
+            # Cancelling mid-construct loses reserved materials (already spent) —
+            # player should finish the job. Still allow stand-by.
             u.status = "idle"
             u.order = ""
             u.target_id = ""
@@ -2525,6 +2723,94 @@ class Game:
                 )
             return self.snapshot()
 
+        if order == "construct":
+            if CAP_BUILD not in u.capabilities:
+                raise ValueError("unit cannot construct — need a construction bot")
+            if u.kind == "ark":
+                raise ValueError(
+                    "ark prefabs structures in the fabrication bay; "
+                    "use a construction bot for on-site assembly"
+                )
+            struct_id = (resource or "").strip()
+            if not struct_id or struct_id not in STRUCTURE_BUILDS:
+                raise ValueError(
+                    "pick a structure to build (e.g. solar_farm, habitat_module)"
+                )
+            body = self.system.body_by_id(target_id)
+            if not body:
+                raise ValueError("pick a body to build on")
+            spec = STRUCTURE_BUILDS[struct_id]
+            building_id = spec.get("building") or struct_id
+            self._validate_structure_on_body(body, building_id, target_id)
+            # Preflight materials (don't reserve until on station)
+            cost = dict(spec.get("cost") or {})
+            have = self._site_and_ark_have(target_id, cost)
+            missing = [
+                f"{need - have.get(res, 0):.1f} t {RESOURCE_NAMES.get(res, res)}"
+                for res, need in cost.items()
+                if have.get(res, 0.0) + 1e-9 < need
+            ]
+            if missing and (
+                not self._is_ark_loc(u.location_id)
+                and self._same_location(u.location_id, target_id)
+            ):
+                # On station already — fail now
+                raise ValueError("short materials: " + ", ".join(missing))
+            if not self._is_ark_loc(u.location_id) and self._same_location(
+                u.location_id, target_id
+            ):
+                self._begin_construct_work(u, target_id, struct_id)
+            else:
+                travel = self._travel_months(u.location_id, target_id, u.kind)
+                dv = self._travel_dv_m_s(u.location_id, target_id, u.kind)
+                self._spend_dv(u, dv, f"transit to build on {body.name}")
+                from_label = self._location_label(u.location_id)
+                u.search_resource = struct_id
+                self._begin_transit(u, target_id, travel, "construct")
+                warn = (
+                    f" (note: site may need {', '.join(missing)} — haul first)"
+                    if missing
+                    else ""
+                )
+                self._log(
+                    "order",
+                    f"{u.name} leaves {from_label} → {body.name} to assemble "
+                    f"{spec['name']}: {u.months_left:.2f} mo transit, "
+                    f"burned {dv:.0f} m/s Δv.{warn}",
+                )
+            return self.snapshot()
+
+        if order == "harvest":
+            if CAP_BUILD not in u.capabilities:
+                raise ValueError("unit cannot harvest — need a construction bot")
+            if u.kind == "ark":
+                raise ValueError("send a construction bot to harvest timber")
+            res = (resource or "log").strip() or "log"
+            if res != "log":
+                raise ValueError("only timber logs are harvestable for now")
+            body = self.system.body_by_id(target_id)
+            if not body:
+                raise ValueError("pick a body to harvest")
+            if not self._body_can_yield_logs(body):
+                raise ValueError(f"no timber/organics worth milling on {body.name}")
+            if not self._is_ark_loc(u.location_id) and self._same_location(
+                u.location_id, target_id
+            ):
+                self._begin_harvest_work(u, target_id)
+            else:
+                travel = self._travel_months(u.location_id, target_id, u.kind)
+                dv = self._travel_dv_m_s(u.location_id, target_id, u.kind)
+                self._spend_dv(u, dv, f"transit to harvest on {body.name}")
+                from_label = self._location_label(u.location_id)
+                u.search_resource = "log"
+                self._begin_transit(u, target_id, travel, "harvest")
+                self._log(
+                    "order",
+                    f"{u.name} leaves {from_label} → {body.name} for timber harvest: "
+                    f"{u.months_left:.2f} mo transit, burned {dv:.0f} m/s Δv.",
+                )
+            return self.snapshot()
+
         if order == "move":
             body = self.system.body_by_id(target_id)
             if not body:
@@ -2648,6 +2934,87 @@ class Game:
             u.status = "idle"
             u.order = ""
             u.target_id = ""
+            u.months_left = 0.0
+            u.months_total = 0.0
+            u.transit_from_id = ""
+            return
+
+        if u.order == "construct":
+            body_id = u.target_id
+            struct_id = u.search_resource or ""
+            # Arrival from transit: still need to start work
+            if u.status == "en_route" or (
+                u.months_left <= 0 and u.status != "working"
+            ):
+                # Completing a transit leg into construct → start assembly
+                try:
+                    self._begin_construct_work(u, body_id, struct_id)
+                except ValueError as e:
+                    u.location_id = body_id
+                    u.status = "idle"
+                    u.order = ""
+                    u.target_id = ""
+                    u.search_resource = ""
+                    u.months_left = 0.0
+                    u.months_total = 0.0
+                    u.transit_from_id = ""
+                    self._log("build", f"{u.name}: cannot start build — {e}")
+                return
+            # Work timer finished
+            spec = STRUCTURE_BUILDS.get(struct_id, {})
+            building_id = spec.get("building") or struct_id
+            name = spec.get("name") or struct_id
+            u.location_id = body_id
+            self._place_structure(body_id, building_id, name, by=u.name)
+            u.status = "idle"
+            u.order = ""
+            u.target_id = ""
+            u.search_resource = ""
+            u.months_left = 0.0
+            u.months_total = 0.0
+            u.transit_from_id = ""
+            return
+
+        if u.order == "harvest":
+            body_id = u.target_id
+            if u.status == "en_route":
+                try:
+                    self._begin_harvest_work(u, body_id)
+                except ValueError as e:
+                    u.location_id = body_id
+                    u.status = "idle"
+                    u.order = ""
+                    u.target_id = ""
+                    u.search_resource = ""
+                    u.months_left = 0.0
+                    u.months_total = 0.0
+                    u.transit_from_id = ""
+                    self._log("build", f"{u.name}: cannot harvest — {e}")
+                return
+            body = self.system.body_by_id(body_id)
+            site = self.sites.setdefault(body_id, Site(body_id=body_id))
+            took = self._log_harvest_yield(body)
+            site.stockpile["log"] = site.stockpile.get("log", 0.0) + took
+            self._log(
+                "build",
+                f"{u.name} milled {took:.0f} t timber logs at "
+                f"{body.name if body else body_id}. "
+                f"Site stock {site.stockpile['log']:.0f} t logs.",
+            )
+            self._discover(
+                "resource_found",
+                f"Timber stocked on {body.name if body else body_id} "
+                f"(+{took:.0f} t logs)",
+                body_id=body_id,
+                resource="log",
+                key=f"log_stock:{body_id}",
+                next_step="Use logs to frame habitats / launch pads with a construction bot.",
+            )
+            u.location_id = body_id
+            u.status = "idle"
+            u.order = ""
+            u.target_id = ""
+            u.search_resource = ""
             u.months_left = 0.0
             u.months_total = 0.0
             u.transit_from_id = ""

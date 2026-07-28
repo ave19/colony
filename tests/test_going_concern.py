@@ -761,6 +761,7 @@ def test_industry_structures_habitat_launch_fuel():
             "panel": 80,
             "H2O": 50,
             "chem_prop": 40,
+            "log": 80,
         }
     )
     for kind in (
@@ -812,7 +813,7 @@ def test_industry_structures_habitat_launch_fuel():
 
 
 def test_structure_builds_catalog_includes_industry():
-    from colony.sim.tech import STRUCTURE_BUILDS
+    from colony.sim.tech import STRUCTURE_BUILDS, UNIT_BUILDS
 
     needed = {
         "solar_farm",
@@ -824,3 +825,81 @@ def test_structure_builds_catalog_includes_industry():
         "extractor",
     }
     assert needed <= set(STRUCTURE_BUILDS.keys())
+    assert "constructor" in UNIT_BUILDS
+    assert "log" in STRUCTURE_BUILDS["habitat_module"]["cost"]
+
+
+def test_constructor_harvests_logs_and_builds_on_site():
+    g = Game(universe_seed=8)
+    _arrive(g)
+    home = g.home_body_id
+    g.ark_stock.update(
+        {
+            "steel": 400,
+            "chip": 60,
+            "panel": 80,
+            "Al": 80,
+            "log": 10,
+            "chem_prop": 40,
+        }
+    )
+    g.queue_build("constructor")
+    while not any(u.kind == "constructor" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    bot = next(u for u in g.fleet.values() if u.kind == "constructor")
+    assert bot.location_id == "ark"
+    assert "build" in bot.capabilities
+
+    g.issue_order(bot.id, "harvest", home, "log")
+    assert bot.order == "harvest"
+    for _ in range(40):
+        g.warp_to_next_event(force=True)
+        if bot.status == "idle" and g.sites.get(home) and g.sites[home].stockpile.get("log", 0) > 15:
+            break
+    assert g.sites[home].stockpile.get("log", 0) > 15
+    assert any(d.get("resource") == "log" for d in g.discoveries)
+
+    # Build solar farm using ark materials at home
+    g.issue_order(bot.id, "construct", home, "solar_farm")
+    for _ in range(40):
+        g.warp_to_next_event(force=True)
+        if g.sites.get(home) and "solar_farm" in g.sites[home].buildings:
+            break
+    assert "solar_farm" in g.sites[home].buildings
+    assert any(d["kind"] == "structure" for d in g.discoveries)
+
+    # Habitat needs logs — site should have enough after harvest + seed
+    g.ark_stock.update({"steel": 100, "chip": 20, "H2O": 30, "panel": 20})
+    # ensure combined stock covers habitat cost
+    g.sites[home].stockpile["log"] = max(g.sites[home].stockpile.get("log", 0), 30)
+    g.issue_order(bot.id, "construct", home, "habitat_module")
+    for _ in range(50):
+        g.warp_to_next_event(force=True)
+        if "habitat_module" in g.sites[home].buildings:
+            break
+    assert "habitat_module" in g.sites[home].buildings
+
+
+def test_constructor_short_materials_refuses():
+    g = Game(universe_seed=8)
+    _arrive(g)
+    home = g.home_body_id
+    # Enough to fab the bot
+    g.ark_stock.update({"steel": 100, "chip": 20, "panel": 10, "Al": 20, "log": 0})
+    g.queue_build("constructor")
+    while not any(u.kind == "constructor" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    bot = next(u for u in g.fleet.values() if u.kind == "constructor")
+    bot.location_id = home
+    bot.status = "idle"
+    # Strip materials so solar farm cannot start
+    g.ark_stock["panel"] = 0
+    g.ark_stock["steel"] = 0
+    g.ark_stock["chip"] = 0
+    if home in g.sites:
+        g.sites[home].stockpile.clear()
+    try:
+        g.issue_order(bot.id, "construct", home, "solar_farm")
+        assert False, "should refuse short materials"
+    except ValueError as e:
+        assert "short" in str(e).lower() or "need" in str(e).lower()

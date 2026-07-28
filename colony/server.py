@@ -58,9 +58,9 @@ class StartHaulBody(BaseModel):
 
 class OrderBody(BaseModel):
     unit_id: str
-    order: str  # survey | mine | move | idle | return_ark | refuel
+    order: str  # survey | mine | construct | harvest | move | idle | return_ark | refuel
     target_id: str = ""
-    resource: str = ""  # for survey: "Fe" = find sources of iron
+    resource: str = ""  # survey: "Fe"; construct: structure id; harvest: "log"
 
 
 @app.get("/api/health")
