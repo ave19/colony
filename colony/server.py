@@ -181,6 +181,31 @@ def plan_base(body: PlanBaseBody):
         raise HTTPException(400, str(e)) from e
 
 
+class ProjectStatusBody(BaseModel):
+    project_id: str
+    status: str  # active | paused | cancelled
+
+
+@app.post("/api/project_status")
+def project_status(body: ProjectStatusBody):
+    try:
+        return room().set_project_status(body.project_id, body.status)
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+
+
+class CancelBuildBody(BaseModel):
+    job_id: str
+
+
+@app.post("/api/cancel_build")
+def cancel_build(body: CancelBuildBody):
+    try:
+        return room().cancel_build(body.job_id)
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/api/deliver_ark")
 def deliver_ark(body: DeliverBody):
     try:
