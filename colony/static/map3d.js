@@ -749,7 +749,10 @@ export class SystemMap3D {
       const dist = Math.hypot(e.clientX - this._downX, e.clientY - this._downY);
       if (dist > 5) return;
       const pick = this._pick(e) || this._downPick;
-      if (!pick) return;
+      if (!pick) {
+        if (this.focusId) this.focusSystem();
+        return;
+      }
       if (pick.type === "unit") {
         this.selectedUnitId = pick.id;
         this._layoutFleet();
