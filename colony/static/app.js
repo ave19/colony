@@ -934,10 +934,17 @@ function bodyCascadeHabitabilityHtml(b) {
     </p>
     ${terraformDossierHtml(d)}
     <div class="action-stack" style="margin-top:12px">
-      <button type="button" class="action-card primary-action" id="bc-start-tf-scan">
-        <span class="action-title">Start ark terraform scan</span>
-        <span class="action-desc">Enables system-wide habitability search (warp for progress).</span>
-      </button>
+      ${
+        (state.ark_scan_goals || []).includes("habitable")
+          ? `<button type="button" class="action-card danger-action" id="bc-start-tf-scan" data-tf-scan-active="1">
+              <span class="action-title">Stop ark terraform scan</span>
+              <span class="action-desc">System-wide habitability search is running — every Warp is capped at ~15 days while it's on. Click to stop.</span>
+            </button>`
+          : `<button type="button" class="action-card primary-action" id="bc-start-tf-scan">
+              <span class="action-title">Start ark terraform scan</span>
+              <span class="action-desc">Enables system-wide habitability search (warp for progress). Caps Warp at ~15 days at a time while active — come back here to stop it.</span>
+            </button>`
+      }
       <button type="button" class="action-card" data-goto-tab="tasks">
         <span class="action-title">Send a survey probe here</span>
         <span class="action-desc">On-station survey fills the dossier faster than remote ark sensing.</span>
@@ -1320,13 +1327,15 @@ function bindBodyCascade(bodyEl, b, tab) {
   const tfScan = bodyEl.querySelector("#bc-start-tf-scan");
   if (tfScan) {
     tfScan.onclick = async () => {
+      const wasActive = tfScan.dataset.tfScanActive === "1";
       try {
         state = await api("/api/ark_scan_goal", {
           method: "POST",
-          body: JSON.stringify({ goal_id: "habitable", enabled: true }),
+          body: JSON.stringify({ goal_id: "habitable", enabled: !wasActive }),
         });
-        $("toast").textContent =
-          "Ark terraform scan enabled — Warp → event for progressive intel.";
+        $("toast").textContent = wasActive
+          ? "Ark terraform scan stopped — Warp is no longer capped by it."
+          : "Ark terraform scan enabled — Warp → event for progressive intel.";
         cascade = { kind: "body", bodyId: b.id, tab: "habitability", _opened: true };
         render();
       } catch (e) {
