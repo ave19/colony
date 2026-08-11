@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import pickle
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .constants import (
@@ -35,6 +38,10 @@ from .constants import AU_M
 
 def _id() -> str:
     return uuid.uuid4().hex[:10]
+
+
+# Solo colony room save file. ".state_*" is gitignored.
+DEFAULT_SAVE_PATH = Path(os.environ.get("COLONY_SAVE_PATH", ".state_one"))
 
 
 @dataclass
@@ -3656,6 +3663,30 @@ class Game:
                     b["has_l1_shield"] = False
         return data
 
+    # --- persistence ---
+    def save(self, path: Optional[Path] = None) -> None:
+        """Persist the whole room to disk (atomic write) so a restart can resume it."""
+        path = Path(path or DEFAULT_SAVE_PATH)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(path)
 
-# Global room (solo host)
-ROOM = Game()
+    @classmethod
+    def load(cls, path: Optional[Path] = None) -> Optional["Game"]:
+        """Load a previously saved room, or None if there's nothing (usable) on disk."""
+        path = Path(path or DEFAULT_SAVE_PATH)
+        if not path.exists():
+            return None
+        try:
+            with open(path, "rb") as f:
+                game = pickle.load(f)
+        except Exception:
+            return None
+        return game if isinstance(game, cls) else None
+
+
+# Global room (solo host) — resume from disk if a save exists, else start fresh.
+ROOM = Game.load() or Game()
+# Catch up sim time to wall clock immediately so a stale save doesn't show a frozen clock.
+ROOM.catch_up()

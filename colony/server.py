@@ -21,6 +21,18 @@ def room():
     return game_mod.ROOM
 
 
+@app.middleware("http")
+async def persist_after_mutation(request, call_next):
+    """Save the room to disk after any successful state-changing request."""
+    response = await call_next(request)
+    if request.method != "GET" and response.status_code < 400:
+        try:
+            room().save()
+        except Exception:
+            pass
+    return response
+
+
 class SelectStarBody(BaseModel):
     seed: int
 

@@ -45,6 +45,8 @@ Open **http://localhost:8765/**
 
 **Time:** sim runs real-time 1:1 with Earth seconds. Use **Warp** for the event queue — do not sit through multi-month fab in wall clock. Jumps longer than ~1 week ask for confirmation.
 
+**Persistence:** the colony room is saved to disk (`.state_one` by default; override with `COLONY_SAVE_PATH`) after every state-changing request, and resumed automatically on the next `python3 main.py` — sim time catches up to wall clock on resume. Delete the save file (or `POST /api/reset`) to start over.
+
 ## Design docs
 
 - [docs/PLAYABLE_LADDER.md](docs/PLAYABLE_LADDER.md) — A→B→C milestones
