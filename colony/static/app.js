@@ -81,6 +81,12 @@ function initMap() {
     else if (u) openUnitCascade(u.id, "actions");
     else render();
   };
+  map.onFocus = (id) => {
+    const btn = $("btn-focus-system");
+    if (!btn) return;
+    btn.classList.toggle("primary", !!id);
+    btn.textContent = id ? "◀ Back to system" : "System view";
+  };
 }
 
 function renderSafe() {
@@ -140,7 +146,7 @@ function render() {
         selectedUnitId,
       });
       $("map-hint").textContent =
-        "Click body or fleet craft · paths show transits · double-click focuses · drag/scroll camera";
+        "Click body or fleet craft · paths show transits · double-click focuses · Esc to zoom out · drag/scroll camera";
     } else if (state.phase !== "system") {
       map.clearSystem();
       $("map-hint").textContent =
@@ -3045,9 +3051,13 @@ if (cascadeClose) cascadeClose.onclick = () => closeCascade();
 const cascadeBackdrop = $("cascade-backdrop");
 if (cascadeBackdrop) cascadeBackdrop.onclick = () => closeCascade();
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && cascade) {
+  if (ev.key !== "Escape") return;
+  if (cascade) {
     ev.preventDefault();
     closeCascade();
+  } else if (map && map.focusId) {
+    ev.preventDefault();
+    map.focusSystem();
   }
 });
 
