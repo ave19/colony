@@ -208,6 +208,8 @@ class BuildJob:
     deploy_body_id: str = ""
     building_id: str = ""  # BUILDINGS key for structures
     dv_capacity_m_s: float = 0.0
+    # Materials pulled from ark_stock at queue time — refunded in full on cancel.
+    cost: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -220,6 +222,7 @@ class BuildJob:
             "status": self.status,
             "deploy_body_id": self.deploy_body_id,
             "building_id": self.building_id,
+            "cost": {k: round(v, 2) for k, v in self.cost.items()},
         }
 
 
@@ -1290,6 +1293,7 @@ class Game:
             deploy_body_id=deploy_body_id or (self.home_body_id if is_structure else ""),
             building_id=spec.get("building") or "",
             dv_capacity_m_s=float(spec.get("dv_capacity_m_s") or 0.0),
+            cost=dict(spec["cost"]),
         )
         self.build_queue.append(job)
         where = ""
@@ -1300,6 +1304,25 @@ class Game:
             "build",
             f"Authorized build: {spec['name']}{where} "
             f"({spec['months']} mo, materials reserved).",
+        )
+        return self.snapshot()
+
+    def cancel_build(self, job_id: str) -> dict:
+        """Cancel a fab-bay job in progress and refund its reserved materials to the ark."""
+        self.catch_up()
+        job = next(
+            (j for j in self.build_queue if j.id == job_id and j.status == "building"),
+            None,
+        )
+        if not job:
+            raise ValueError("unknown or already-finished build job")
+        for res, amt in job.cost.items():
+            self.ark_stock[res] = self.ark_stock.get(res, 0.0) + amt
+        self.build_queue.remove(job)
+        cost_s = ", ".join(f"{v:g} t {k}" for k, v in job.cost.items())
+        self._log(
+            "build",
+            f"Cancelled build: {job.name} — bay freed, materials refunded: {cost_s}.",
         )
         return self.snapshot()
 
@@ -2571,13 +2594,15 @@ class Game:
         u = self.fleet.get(unit_id)
         if not u:
             raise ValueError("unknown unit")
-        # Busy if en_route with time left, or timed work, or surveying (must idle first)
-        if u.status == "en_route" and u.months_left > 0:
+        # Busy if en_route with time left, or timed work, or surveying — but "idle"
+        # (cancel/stand by) always gets through so a unit can always be freed up.
+        if u.status == "en_route" and u.months_left > 0 and order != "idle":
             raise ValueError(f"{u.name} is en route")
         if (
             u.status == "working"
             and u.order in ("mine", "construct", "harvest")
             and u.months_left > 0
+            and order != "idle"
         ):
             raise ValueError(f"{u.name} is busy ({u.order})")
         if u.status == "working" and u.order == "survey" and order != "idle":
@@ -2585,8 +2610,20 @@ class Game:
         assert self.system
 
         if order == "idle":
-            # Cancelling mid-construct loses reserved materials (already spent) —
-            # player should finish the job. Still allow stand-by.
+            # Time already spent (transit/work) and any Δv already burned are sunk —
+            # but a mid-construct job already pulled its materials, so refund those
+            # to the site stockpile (nothing was actually built) rather than lose them.
+            refund_note = ""
+            if u.status == "working" and u.order == "construct" and u.search_resource:
+                spec = STRUCTURE_BUILDS.get(u.search_resource)
+                if spec:
+                    cost = dict(spec.get("cost") or {})
+                    site = self.sites.setdefault(u.target_id, Site(body_id=u.target_id))
+                    for res, amt in cost.items():
+                        site.stockpile[res] = site.stockpile.get(res, 0.0) + amt
+                    cost_s = ", ".join(f"{v:g} t {k}" for k, v in cost.items())
+                    refund_note = f" Materials refunded to site stockpile: {cost_s}."
+            was_busy = u.status != "idle"
             u.status = "idle"
             u.order = ""
             u.target_id = ""
@@ -2594,7 +2631,12 @@ class Game:
             u.months_left = 0.0
             u.months_total = 0.0
             u.transit_from_id = ""
-            self._log("order", f"{u.name}: standing by.")
+            self._log(
+                "order",
+                f"{u.name}: standing by."
+                if not was_busy
+                else f"{u.name}: assignment cancelled — standing by.{refund_note}",
+            )
             return self.snapshot()
 
         if order == "refuel":
@@ -3138,6 +3180,57 @@ class Game:
                     site.buildings.append(b)
             proj.status = "complete"
             self._log("project", f"Project complete: {proj.name}. Buildings online: {', '.join(proj.buildings)}.")
+
+    PROJECT_TRANSITIONS = {
+        "active": {"paused", "cancelled"},
+        "paused": {"active", "cancelled"},
+        "cancelled": {"active"},  # restart
+    }
+
+    def set_project_status(self, project_id: str, status: str) -> dict:
+        """
+        Pause / resume / cancel / restart a base project.
+
+        Nothing is pre-reserved by plan_base itself (materials are only spent when
+        actually delivered), so there's no stockpile to refund here — cancelling
+        just stops its open contracts from nagging as needs. Restarting a
+        cancelled project reopens whatever it cancelled (preserving delivered_t
+        progress) so a haul already in flight still counts if it lands after.
+        """
+        self.catch_up()
+        proj = self.projects.get(project_id)
+        if not proj:
+            raise ValueError("unknown project")
+        if status not in ("active", "paused", "cancelled"):
+            raise ValueError(f"unknown status {status}")
+        if proj.status == "complete":
+            raise ValueError("project already complete")
+        if status == proj.status:
+            return self.snapshot()
+        allowed = self.PROJECT_TRANSITIONS.get(proj.status, set())
+        if status not in allowed:
+            raise ValueError(f"cannot go from {proj.status} to {status}")
+
+        if status == "cancelled":
+            for c in self.contracts.values():
+                if c.project_id == project_id and c.status == "open":
+                    c.status = "cancelled"
+            self._log("project", f"Project cancelled: {proj.name}.")
+        elif proj.status == "cancelled" and status == "active":
+            for c in self.contracts.values():
+                if (
+                    c.project_id == project_id
+                    and c.status == "cancelled"
+                    and c.delivered_t < c.amount_t - 1e-6
+                ):
+                    c.status = "open"
+            self._log("project", f"Project restarted: {proj.name}.")
+        elif status == "paused":
+            self._log("project", f"Project paused: {proj.name}.")
+        else:
+            self._log("project", f"Project resumed: {proj.name}.")
+        proj.status = status
+        return self.snapshot()
 
     # --- hauls ---
     def haul_options(self, origin_id: str, dest_id: str) -> List[dict]:

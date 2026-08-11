@@ -903,3 +903,138 @@ def test_constructor_short_materials_refuses():
         assert False, "should refuse short materials"
     except ValueError as e:
         assert "short" in str(e).lower() or "need" in str(e).lower()
+
+
+def test_cancel_build_refunds_materials_and_frees_bay():
+    g = Game(universe_seed=9)
+    _arrive(g)
+    before = dict(g.ark_stock)
+    g.queue_build("survey")
+    job = g.build_queue[0]
+    cost = dict(job.cost)
+    assert cost  # survey satellite costs something
+    for res, amt in cost.items():
+        assert g.ark_stock[res] == before[res] - amt
+    # Bay is busy — a second build is refused
+    try:
+        g.queue_build("survey")
+        assert False, "bay should be busy"
+    except ValueError:
+        pass
+
+    g.cancel_build(job.id)
+    assert g.build_queue == []
+    for res, amt in before.items():
+        assert abs(g.ark_stock.get(res, 0.0) - amt) < 1e-6
+    # Bay free again — restart works
+    g.queue_build("survey")
+    assert len(g.build_queue) == 1
+
+
+def test_cancel_unit_order_works_mid_transit_and_mid_construct():
+    g = Game(universe_seed=10)
+    _arrive(g)
+    home = g.home_body_id
+    dest = next(b for b in g.system.bodies if b.kind == "planet" and b.id != home)
+    g.ark_stock.update({"steel": 400, "chip": 60, "panel": 80, "Al": 80, "log": 10})
+    g.queue_build("survey")
+    while not any(u.kind == "survey" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    probe = next(u for u in g.fleet.values() if u.kind == "survey")
+
+    g.issue_order(probe.id, "move", dest.id)
+    assert probe.status == "en_route" and probe.months_left > 0
+    dv_after_move = probe.dv_remaining_m_s
+    # Previously this raised "en route" — should now free the unit instead.
+    g.issue_order(probe.id, "idle")
+    assert probe.status == "idle"
+    assert probe.order == ""
+    # Burned Δv is sunk, not refunded, but the unit is usable again immediately.
+    assert probe.dv_remaining_m_s == dv_after_move
+    g.issue_order(probe.id, "survey", home)  # no error — unit is free
+
+    g.queue_build("constructor")
+    while not any(u.kind == "constructor" for u in g.fleet.values()):
+        g.warp_to_next_event(force=True)
+    bot = next(u for u in g.fleet.values() if u.kind == "constructor")
+    bot.location_id = home
+    bot.status = "idle"
+    ark_before = dict(g.ark_stock)
+    g.issue_order(bot.id, "construct", home, "solar_farm")
+    assert bot.status == "working" and bot.order == "construct"
+    spent = {
+        res: ark_before.get(res, 0.0) - g.ark_stock.get(res, 0.0)
+        for res in ("panel", "steel", "chip")
+    }
+    assert spent["panel"] > 0  # materials were pulled up front
+
+    g.issue_order(bot.id, "idle")  # previously raised "busy (construct)"
+    assert bot.status == "idle"
+    assert bot.order == ""
+    site = g.sites[home]
+    for res, amt in spent.items():
+        assert abs(site.stockpile.get(res, 0.0) - amt) < 1e-6
+    assert "solar_farm" not in site.buildings
+    # Bot is free to take a new order immediately.
+    g.issue_order(bot.id, "harvest", home, "log")
+    assert bot.status == "working" and bot.order == "harvest"
+
+
+def test_project_pause_resume_cancel_restart_lifecycle():
+    g = Game(universe_seed=12)
+    _arrive(g)
+    home = g.home_body_id
+    result = g.plan_base(home, "solar", "underground", "Test Base")
+    proj = next(p for p in g.projects.values() if p.body_id == home)
+    open_contracts = [c for c in g.contracts.values() if c.project_id == proj.id]
+    assert open_contracts and all(c.status == "open" for c in open_contracts)
+
+    # active -> paused -> active
+    g.set_project_status(proj.id, "paused")
+    assert proj.status == "paused"
+    g.set_project_status(proj.id, "active")
+    assert proj.status == "active"
+
+    # Invalid transition
+    try:
+        g.set_project_status(proj.id, "bogus")
+        assert False, "should reject unknown status"
+    except ValueError:
+        pass
+
+    # Deliver partial progress before cancelling, to prove it survives restart.
+    c = open_contracts[0]
+    g.ark_stock[c.resource] = g.ark_stock.get(c.resource, 0.0) + c.amount_t
+    g.deliver_from_ark(c.id, c.amount_t * 0.25)
+    delivered_before_cancel = c.delivered_t
+    assert delivered_before_cancel > 0
+
+    # active -> cancelled: open contracts stop accepting deliveries
+    g.set_project_status(proj.id, "cancelled")
+    assert proj.status == "cancelled"
+    assert c.status == "cancelled"
+    try:
+        g.deliver_from_ark(c.id, 1.0)
+        assert False, "cancelled contract should refuse delivery"
+    except ValueError:
+        pass
+
+    # cancelled -> active (restart): contract reopens, progress preserved
+    g.set_project_status(proj.id, "active")
+    assert proj.status == "active"
+    assert c.status == "open"
+    assert c.delivered_t == delivered_before_cancel
+    g.deliver_from_ark(c.id, 1.0)  # works again
+    assert c.delivered_t > delivered_before_cancel
+
+    # Cannot pause/restart a completed project
+    for cc in g.contracts.values():
+        if cc.project_id == proj.id:
+            g.ark_stock[cc.resource] = g.ark_stock.get(cc.resource, 0.0) + cc.amount_t
+            g.deliver_from_ark(cc.id, cc.amount_t)
+    assert proj.status == "complete"
+    try:
+        g.set_project_status(proj.id, "paused")
+        assert False, "completed project should not accept transitions"
+    except ValueError:
+        pass

@@ -1923,7 +1923,7 @@ function constructorActionsHtml(u, loc, locName, busy, mission) {
         u.status === "idle" && !u.order ? "disabled" : ""
       }>
         <span class="action-title">Stand by / recall</span>
-        <span class="action-desc">Cancel assignment (reserved materials stay spent if mid-build).</span>
+        <span class="action-desc">Cancel assignment — mid-build materials are refunded to the site stockpile. Free for a new order.</span>
       </button>
     </div>
   `;
@@ -2287,6 +2287,9 @@ function arkCascadeFabHtml() {
           <div class="title">${j.name}</div>
           <div class="meta">Bay occupied · ${left.toFixed(1)} mo of ${total.toFixed(1)} mo${deploy} · warp to finish</div>
           <div class="queue-bar"><i style="width:${done.toFixed(1)}%"></i></div>
+          <button type="button" class="order" data-cancel-build="${j.id}" style="margin-top:8px">
+            Cancel — refund materials &amp; free the bay
+          </button>
         </div>`;
       })
       .join("");
@@ -2496,6 +2499,20 @@ function bindArkCascade(body, tab) {
           render();
         } catch (e) {
           alert(String(e.message || e).slice(0, 320));
+        }
+      };
+    });
+    body.querySelectorAll("[data-cancel-build]").forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          state = await api("/api/cancel_build", {
+            method: "POST",
+            body: JSON.stringify({ job_id: btn.dataset.cancelBuild }),
+          });
+          cascade = { kind: "ark", tab: "fab" };
+          render();
+        } catch (e) {
+          alert(String(e.message || e).slice(0, 280));
         }
       };
     });
@@ -2951,10 +2968,37 @@ function renderProjects() {
     ? list
         .map((p) => {
           const b = bodyById(p.body_id);
-          return `<div class="card"><h3>${p.name}</h3><p>${b ? b.name : p.body_id} · ${p.status}</p></div>`;
+          let actions = "";
+          const dangerStyle = "border-color:#c86";
+          if (p.status === "active") {
+            actions = `<button type="button" data-project-status="${p.id}" data-status="paused">Pause</button>
+              <button type="button" style="${dangerStyle}" data-project-status="${p.id}" data-status="cancelled">Cancel</button>`;
+          } else if (p.status === "paused") {
+            actions = `<button type="button" data-project-status="${p.id}" data-status="active">Resume</button>
+              <button type="button" style="${dangerStyle}" data-project-status="${p.id}" data-status="cancelled">Cancel</button>`;
+          } else if (p.status === "cancelled") {
+            actions = `<button type="button" data-project-status="${p.id}" data-status="active">Restart</button>`;
+          }
+          return `<div class="card"><h3>${p.name}</h3><p>${b ? b.name : p.body_id} · ${p.status}</p>${actions}</div>`;
         })
         .join("")
     : '<p class="empty">None</p>';
+  el.querySelectorAll("[data-project-status]").forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        state = await api("/api/project_status", {
+          method: "POST",
+          body: JSON.stringify({
+            project_id: btn.dataset.projectStatus,
+            status: btn.dataset.status,
+          }),
+        });
+        render();
+      } catch (e) {
+        alert(String(e.message || e).slice(0, 280));
+      }
+    };
+  });
 }
 
 function renderContracts() {
